@@ -1,0 +1,11 @@
+build*/
+dist/
+*.exe
+*.obj
+*.z64
+*.v64
+*.n64
+*.mpk
+wdc_config/
+RecompiledFuncs*/
+rom/

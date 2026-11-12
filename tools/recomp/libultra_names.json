@@ -1,0 +1,53 @@
+{
+  "_nota": "Nomes de libultra aplicados por tools/recomp/gen_wdc_toml.py. Cada entrada: [nome, tipo, evidencia]. Tipos: 'novo' (funcao anonima ganha nome), 'corrige' (nome do n64sym estava errado), 'remove' (nome do n64sym removido). Fontes de verificacao: libreultra 2.0I em thirdparty/libreultra (so leitura) e o disassembly em config/asm/1050.s. O SDK do WDC e mais novo que 2.0I: a ordem das funcoes por objeto as vezes se inverte e ha chamadas a mais.",
+  "nomes": {
+    "800706D0": ["osUnmapTLBAll", "novo", "laco tlbwi 0x1E..0 com EntryHi=0x80000000 e EntryLo0/1=0; restaura EntryHi"],
+    "8006F0F4": ["__osPackReadData", "novo", "contreaddata.c [osContStartReadData, osContGetReadData, __osPackReadData]; objeto comeca em 0x8006EFC0 (n64sym contreaddata_text_0134)"],
+    "8006F63C": ["rmonPrintf", "novo", "syncprintf.c [osSyncPrintf, rmonPrintf]; stub identico a osSyncPrintf, logo depois dele"],
+    "8006FE70": ["osCreateViManager", "novo", "vimgr.c: osCreateMesgQueue, osSetEventMesg x2, osCreateThread, __osViInit, osStartThread, __osTimerServicesInit; todos os chamados da ROM estao no fonte"],
+    "8006FFF8": ["viMgrMain", "novo", "vimgr.c: laco de osRecvMesg/osSendMesg/__osViSwapContext/osGetCount/__osTimerInterrupt/__osViGetCurrentContext; vem logo apos osCreateViManager como no fonte"],
+    "80070730": ["guRotateF", "novo", "chama guNormalize, sinf, cosf, guMtxIdentF e NAO usa sqrt (guAlignF do fonte usa sqrtf; a ROM nao tem jal sqrtf nem sqrt.s). n64sym listava guAlignF/guRotateF no mesmo endereco"],
+    "800708C4": ["guRotate", "corrige", "wrapper que chama guRotateF (0x80070730) + guMtxF2L; n64sym dizia guAlign"],
+    "80071040": ["guMtxXFMF", "novo", "mtxcatf.c em ordem inversa [guMtxXFMF, guMtxCatF]; funcao 0xA0 imediatamente antes de guMtxCatF"],
+    "80071410": ["cosf", "novo", "libm logo apos sinf; n64sym listava cosf/__cosf no mesmo endereco; nome exportado e cosf"],
+    "80071580": ["guScaleF", "novo", "chama guMtxIdentF e grava a1->mf[0][0], a2->mf[1][1], a3->mf[2][2] e 1.0f->mf[3][3] (scale.c); 0x54 bytes e pequena demais para guRotateRPYF"],
+    "800715D4": ["guScale", "corrige", "wrapper que chama guScaleF (0x80071580) + guMtxF2L; n64sym dizia guRotateRPY"],
+    "80071640": ["_VirtualToPhysicalTask", "novo", "sptask.c; objeto comeca aqui (n64sym sptask_text_0000)"],
+    "80071940": ["__ull_rshift", "novo", "ll.c: janela com 8 ancoras"],
+    "80071A10": ["__ll_rem", "novo", "ll.c: janela com 8 ancoras; ddivu+mfhi porque __ll_rem(unsigned long long a0, long long a1) usa a0 sem sinal"],
+    "80072EE8": ["__osClearPage", "novo", "pfsallocatefile.c; n64sym pfsallocatefile_text_06E8"],
+    "80072FB0": ["__osPfsGetNextPage", "novo", "pfsreadwritefile.c; objeto comeca aqui (n64sym pfsreadwritefile_text_0000)"],
+    "800738D0": ["osMotorStart", "novo", "motor.c; usa _MotorStartData/_motorstartbuf (+0x100 e +0x20 acima dos usados por osMotorStop, ordem do fonte)"],
+    "80073A70": ["_MakeMotorData", "novo", "motor.c; n64sym motor_text_0340"],
+    "80074250": ["proutSprintf", "novo", "sprintf.c em ordem inversa; objeto comeca aqui (n64sym sprintf_text_0000)"],
+    "80074C40": ["osPiReadIo", "corrige", "chama __osPiGetAccess, osPiRawReadIo, __osPiRelAccess; osPiRawReadIo (0x80077100) le o dispositivo e grava em *a1. n64sym dizia osPiWriteIo; o runtime tem osPiReadIo como reimplementada e osPiWriteIo como ignorada"],
+    "80074D30": ["osAiSetFrequency", "novo", "escreve AI_DACRATE, AI_BITRATE, AI_CONTROL (aisetfreq.c); o nome na libultra e osAiSetFrequency"],
+    "80074EA0": ["osAiGetLength", "novo", "le AI_LEN (aigetlen.c)"],
+    "80075DE0": ["__osTimerServicesInit", "novo", "timerintr.c (3 ancoras); chamado por osCreateViManager como em vimgr.c"],
+    "80076200": ["__osViGetCurrentContext", "novo", "retorna __osViCurr; chamado por viMgrMain como em vimgr.c"],
+    "80076570": ["osCartRomInit", "novo", "chama osPiRawReadIo, bzero, __osDisableInt, __osRestoreInt: identico ao conjunto de chamadas de cartrominit.c"],
+    "80076670": ["osDriveRomInit", "novo", "grava PI_BSD_DOM2_LAT/PWD/PGS/RLS; chama bzero e __osDisableInt/__osRestoreInt (driverominit.c); fica depois de osCartRomInit como no fonte"],
+    "80077000": ["__osSiRawReadIo", "novo", "chama __osSiDeviceBusy; lw do dispositivo (devAddr|0xA0000000) e sw em *a1"],
+    "80077050": ["__osSiRawWriteIo", "novo", "chama __osSiDeviceBusy; sw do dado no dispositivo (devAddr|0xA0000000)"],
+    "800734D0": ["osPfsRepairId", "novo", "identica byte a byte a __osGetId (0x80078254). No fonte so osPfsRepairId (pfsrepairid.c) e __osGetId (contpfs.c) chamam {__osContRamRead, __osIdCheckSum, __osCheckPackId, __osRepairPackId x2}; __osGetId ja esta fixado em 0x80078254 pela janela de contpfs.c (7 ancoras), logo esta e osPfsRepairId. E funcao publica: o codigo do jogo a chama (func_8002C500, func_80039318) e o runtime tem osPfsRepairId_recomp"],
+    "80078254": ["__osGetId", "novo", "contpfs.c: janela com 7 ancoras (a copia gemea em 0x800734D0 e osPfsRepairId)"],
+    "80078B5C": ["__osPackRamReadData", "novo", "contramread.c; n64sym contramread_text_021C"],
+    "80079904": ["__osPackRamWriteData", "novo", "contramwrite.c; n64sym contramwrite_text_0204"],
+    "80079BE0": ["_Putfld", "novo", "xprintf.c em ordem inversa; chama _Ldtob/_Litob/strlen; objeto comeca aqui (n64sym xprintf_text_0000)"],
+    "8007AF74": ["__osLeoAbnormalResume", "novo", "leointerrupt.c; n64sym leointerrupt_text_06A4"],
+    "8007B05C": ["__osLeoResume", "novo", "leointerrupt.c; n64sym leointerrupt_text_078C"],
+    "8007B150": ["osSetIntMask", "novo", "mfc0 SR, __OSGlobalIntMask, MI_INTR_MASK_REG, __osRcpImTable, mtc0 SR: igual a setintmask.s instrucao por instrucao"],
+    "8007B720": ["memcpy", "novo", "string.c em ordem inversa [memcpy, strlen, strchr]; adjacente a strlen/strchr nomeadas (2 ancoras)"]
+  },
+  "remover": {
+    "8000FBE0": ["osSetTime", "grava a0 e a1 em 0x8007E57C e 0x8007E584 (separadas por 8 bytes); osSetTime(OSTime) gravaria 2 palavras consecutivas. Estava em ignored_funcs: o N64Recomp a descartaria"],
+    "80019EC4": ["memcpy", "fica no meio de rotinas de preenchimento da Boss; o memcpy da libultra e 0x8007B720 (nome duplicado)"]
+  },
+  "ignorar": {
+    "osDriveRomInit": "libultra sem nenhum jal chamador; grava PI_BSD_DOM2_* e nao esta nas listas do N64Recomp",
+    "__osPfsReleasePages": "helper interno de Pak; unico chamador e osPfsDeleteFile, que o runtime substitui (osPfs* = PFS_ERR_NOPACK)",
+    "__osPfsDeclearPage": "helper interno de Pak; unico chamador e osPfsAllocateFile, que o runtime substitui",
+    "__osBlockSum": "helper interno de Pak; unico chamador e __osPfsReleasePages (ignorada)",
+    "__osClearPage": "helper interno de Pak; unico chamador e __osPfsDeclearPage (ignorada)"
+  }
+}

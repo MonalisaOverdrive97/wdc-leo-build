@@ -1,0 +1,114 @@
+WORLD DRIVER CHAMPIONSHIP  -  LEO BUILD 0.1.0 (canary)
+Recompilação para PC (não oficial)
+=====================================================================
+
+COMO JOGAR (3 passos)
+---------------------
+1. Extraia a pasta inteira do arquivo .zip: botão direito no .zip >
+   "Extrair tudo...". Coloque-a num lugar fácil (Documentos, Área de Trabalho).
+   Não abra o jogo de dentro do .zip.
+
+2. Abra o arquivo  WorldDriverChampionship.exe  (o ícone do carro amarelo).
+   Aparece a tela de configuração. Aperte o botão JOGAR (ou a tecla Enter).
+
+3. Na primeira vez o programa pede a ROM do jogo (o arquivo do World Driver
+   Championship, versão dos EUA). Escolha o arquivo e pronto: isso só é
+   pedido uma vez, porque o programa guarda uma cópia.
+   O programa NÃO inclui a ROM: ela precisa ser a sua.
+   Dica: se você colocar o arquivo da ROM na mesma pasta do jogo, ele é
+   encontrado sozinho, sem perguntar.
+
+Dica: na tela de configuração, clique em "ATALHO NA ÁREA DE TRABALHO" para
+criar um atalho e abrir o jogo com um clique duplo.
+
+
+O QUE É PRECISO
+---------------
+- Windows 10 ou 11, 64 bits.
+- Placa de vídeo com suporte a Vulkan 1.1 (qualquer NVIDIA, AMD ou Intel dos
+  últimos anos, com o driver atualizado). Não precisa instalar mais nada.
+- Cerca de 2 GB de memória livre e 100 MB de espaço em disco.
+- A ROM do World Driver Championship (USA), no formato .z64, .v64 ou .n64.
+
+
+DOIS MODOS DE JOGO (escolha na tela de configuração)
+----------------------------------------------------
+LEGACY    Como no Nintendo 64: recompilação pura. 30 quadros por segundo
+          nas corridas e resolução original.
+ENHANCED  60 quadros por segundo nas corridas e imagem melhorada: resolução
+          interna ampliada, sincronização com o monitor e suavização.
+          Botão "IMAGEM..." na tela de configuração: resolução (AUTO, 1x,
+          2x, 4x), tela 4:3 ou esticada, tipo de suavização, V-Sync e
+          abrir em tela cheia. A resolução interna só vale no Enhanced.
+
+Cada modo tem o seu próprio "cartão de memória" virtual (saves separados),
+porque gravações e replays de um modo não servem no outro.
+
+
+CONTROLES
+---------
+Controle de Xbox (ou compatível com XInput) - esquema CLÁSSICO:
+  Analógico esquerdo   direção            A         acelera
+  B ou X               freia (e ré)       LB        freio suave
+  RB                   marcha acima       LT / RT   marcha abaixo
+  Y                    troca a visão (câmera)
+  Analógico direito    botões C (menus)   Start     pausa
+
+Esquema MODERNO (só durante a corrida; nos menus vale o clássico):
+  RT acelera, LT freia, X e LB descem a marcha, A e RB sobem a marcha,
+  Y troca a visão.
+
+O jogo só usa marchas manuais se OPTIONS > TRANSMISSION estiver em manual.
+
+"PERSONALIZAR..." na tela de configuração: mude qual botão faz cada coisa
+(clique no botão do meio de uma linha e aperte o botão desejado no controle,
+ou use as setas). "Padrão" restaura os botões originais do esquema.
+
+Teclado:
+  Setas             direção (analógico)    X       acelera (A)
+  C                 freia (B)              Z       botão Z
+  Q / E             botões L / R           Enter   Start
+  W A S D           direcional (menus)     I J K L botões C
+  F11               tela cheia / janela    Esc     sair do jogo
+
+
+ONDE FICAM OS SAVES
+-------------------
+Na pasta  wdc_config  que o jogo cria ao lado do WorldDriverChampionship.exe:
+  wdc_pak0.mpk            saves do modo Legacy
+  wdc_pak0_enhanced.mpk   saves do modo Enhanced
+  wdc_config.toml         suas escolhas (pode ser editado no Bloco de Notas)
+  wdc.z64                 cópia da ROM guardada pelo programa
+Para fazer backup, copie a pasta wdc_config inteira. Para começar do zero,
+apague os arquivos .mpk. Para trocar a ROM, apague wdc.z64.
+
+
+PROBLEMAS COMUNS
+----------------
+- Mensagem sobre Vulkan ou tela preta: atualize o driver da placa de vídeo
+  (site da NVIDIA, AMD ou Intel) e tente de novo.
+- "Esta é uma versão diferente do jogo": a ROM precisa ser a versão dos EUA
+  (USA) do World Driver Championship.
+- A imagem está pesada ou travando: na tela de configuração escolha IMAGEM...
+  e diminua a resolução interna (2x ou 1x), ou use o modo Legacy.
+- O antivírus reclamou: o programa é novo e não tem assinatura digital; isso é
+  esperado em programas de hobby. Se confiar em quem lhe enviou, libere-o.
+- Se algo travar, feche a janela e abra de novo. Se o problema continuar,
+  avise quem lhe passou o jogo e envie o arquivo  wdc_config\wdc_log.txt
+  (o registro da última vez que o jogo foi aberto).
+
+
+SOBRE ESTA VERSÃO (canary)
+--------------------------
+É uma versão de teste: pode ter defeitos. Os modos, a personalização e a
+instalação ainda estão sendo refinados.
+
+
+LICENÇAS E AVISO
+----------------
+Este é um projeto de fãs, sem ligação com a Boss Game Studios, a Midway ou a
+Nintendo. World Driver Championship e seus personagens, carros, músicas e
+imagens pertencem aos seus donos. Nenhum arquivo do jogo original é
+distribuído aqui.
+O programa usa software livre: N64Recomp / N64ModernRuntime (GPL-3.0 e MIT),
+parallel-RDP (MIT). Os textos das licenças estão na pasta "licenses".
