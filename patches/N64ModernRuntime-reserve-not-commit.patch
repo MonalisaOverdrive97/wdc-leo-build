@@ -1,13 +1,16 @@
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 850689d..5ab5dfb 100644
 --- a/librecomp/src/recomp.cpp
 +++ b/librecomp/src/recomp.cpp
-@@ -936,13 +936,16 @@
+@@ -936,12 +936,13 @@ void recomp::start(const recomp::Configuration& cfg) {
      uint8_t* rdram;
      bool alloc_failed;
  #ifdef _WIN32
 -    rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
 -    DWORD old_protect = 0;
-+    // WDC: so RESERVA os 4 GiB de espaco de enderecos e COMITA apenas mem_size (o original comitava os 4 GiB, o que conta contra
-+    // o limite de commit do Windows e derruba o jogo em PCs com pouca memoria).
++    // WDC (patch local): so RESERVA os 4 GiB de espaco de enderecos e COMITA apenas mem_size. O original comitava os 4 GiB inteiros (MEM_COMMIT|MEM_RESERVE), o que
++    // conta contra o limite de commit do Windows (RAM + arquivo de paginacao) e derruba o jogo em PCs com pouca memoria. Acessar acima de mem_size continua dando
++    // violacao de acesso (reservado e nao comitado), como o PAGE_NOACCESS antigo.
 +    rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_RESERVE, PAGE_NOACCESS));
      alloc_failed = (rdram == nullptr);
      if (!alloc_failed) {
@@ -17,4 +20,3 @@
          if (alloc_failed) {
              VirtualFree(rdram, 0, MEM_RELEASE);
          }
-     }

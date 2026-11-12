@@ -66,9 +66,10 @@ def main():
     shutil.copy2(ROOT / "tools" / "release" / "README_repo.md", OUT / "README.md")
     shutil.copy2(ROOT / "thirdparty" / "N64ModernRuntime" / "COPYING", OUT / "LICENSE")
     (OUT / "patches").mkdir()
-    shutil.copy2(ROOT / "tools" / "release" / "patches" / "N64ModernRuntime-reserve-not-commit.patch", OUT / "patches" / "N64ModernRuntime-reserve-not-commit.patch")
+    for pf in sorted((ROOT / "tools" / "release" / "patches").glob("*.patch")):
+        shutil.copy2(pf, OUT / "patches" / pf.name)
     (OUT / ".gitignore").write_text("build*/\ndist/\n*.exe\n*.obj\n*.z64\n*.v64\n*.n64\n*.mpk\nwdc_config/\nRecompiledFuncs*/\nrom/\n", encoding="utf-8")
-    print(f"{n + 4} arquivos em {OUT}")
+    print(f"{n + 3 + len(list((OUT / 'patches').iterdir()))} arquivos em {OUT}")
 
 
 if __name__ == "__main__":

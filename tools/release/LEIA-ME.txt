@@ -1,4 +1,4 @@
-WORLD DRIVER CHAMPIONSHIP  -  LEO BUILD 0.1.1 (canary)
+WORLD DRIVER CHAMPIONSHIP  -  LEO BUILD 0.1.2 (canary)
 Recompilação para PC (não oficial)
 =====================================================================
 

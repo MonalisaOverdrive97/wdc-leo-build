@@ -1,0 +1,190 @@
+diff --git a/RSPRecomp/src/rsp_recomp.cpp b/RSPRecomp/src/rsp_recomp.cpp
+index 518477d..2034a47 100644
+--- a/RSPRecomp/src/rsp_recomp.cpp
++++ b/RSPRecomp/src/rsp_recomp.cpp
+@@ -110,6 +110,10 @@ std::unordered_map<InstrId, std::array<RspOperand, 3>> vector_operands{
+     { InstrId::rsp_mfc2,    {RspOperand::Rt, RspOperand::Vs, RspOperand::None}},
+     { InstrId::rsp_mtc2,    {RspOperand::Rt, RspOperand::Vs, RspOperand::None}},
+ 
++    // Rt, control register index (VCO=0, VCC=1, VCE=2)  [WDC patch: o ucode usa cfc2 para ler o VCC apos vch/vcl]
++    { InstrId::rsp_cfc2,    {RspOperand::Rt, RspOperand::VsIndex, RspOperand::None}},
++    { InstrId::rsp_ctc2,    {RspOperand::Rt, RspOperand::VsIndex, RspOperand::None}},
++
+     // Nop
+     { InstrId::rsp_vnop,    {RspOperand::None, RspOperand::None, RspOperand::None}}
+ };
+@@ -161,6 +165,27 @@ std::string_view c0_reg_write_action(int cop0_reg) {
+ 
+ }
+ 
++// WDC patch (opt-in via `cop0_hooks = true` no TOML): em vez de fingir que o RSP nao tem estado, os acessos a COP0 que nao
++// sao DMA viram chamadas RSP_MFC0(reg) / RSP_MTC0(reg, valor), definidas pelo projeto (extra_include). Isso permite modelar
++// SP_STATUS (sinais SIG0..SIG7, interrupcao, break), DPC_START/END/CURRENT/STATUS e a espera de DMA de ucodes graficos.
++// Os 4 registradores de DMA (SP_MEM_ADDR, SP_DRAM_ADDR, SP_RD_LEN, SP_WR_LEN) seguem pelos macros SET_DMA_*/DO_DMA_*.
++static bool g_cop0_hooks = false;
++static bool g_had_error = false;
++static bool g_persist_state = false;   // WDC patch: estado do RSP persiste entre chamadas (static)
++static std::unordered_set<uint32_t> g_label_hooks;   // WDC patch: enderecos que recebem RSP_LABEL_HIT(addr) (contadores de execucao)
++
++bool cop0_reg_is_dma(int cop0_reg) {
++    switch (static_cast<Cop0Reg>(cop0_reg)) {
++    case Cop0Reg::RSP_COP0_SP_MEM_ADDR:
++    case Cop0Reg::RSP_COP0_SP_DRAM_ADDR:
++    case Cop0Reg::RSP_COP0_SP_RD_LEN:
++    case Cop0Reg::RSP_COP0_SP_WR_LEN:
++        return true;
++    default:
++        return false;
++    }
++}
++
+ bool is_c0_reg_write_dma_read(int cop0_reg) {
+     return static_cast<Cop0Reg>(cop0_reg) == Cop0Reg::RSP_COP0_SP_RD_LEN;
+ }
+@@ -176,7 +201,7 @@ std::optional<int> get_rsp_element(const rabbitizer::InstructionRsp& instr) {
+ }
+ 
+ bool rsp_ignores_element(InstrId id) {
+-    return id == InstrId::rsp_vmacq || id == InstrId::rsp_vnop;
++    return id == InstrId::rsp_vmacq || id == InstrId::rsp_vnop || id == InstrId::rsp_cfc2 || id == InstrId::rsp_ctc2;
+ }
+ 
+ struct BranchTargets {
+@@ -234,6 +259,9 @@ bool process_instruction(size_t instr_index, const std::vector<rabbitizer::Instr
+         if (branch_targets.direct_targets.contains(instr_vram) || branch_targets.indirect_targets.contains(instr_vram)) {
+             fmt::print(output_file, "L_{:04X}:\n", instr_vram);
+         }
++        if (g_label_hooks.contains(instr_vram)) {
++            fmt::print(output_file, "    RSP_LABEL_HIT(0x{:04X});\n", instr_vram);
++        }
+     }
+ 
+     uint16_t branch_target = instr.getBranchVramGeneric() & rsp_mem_mask;
+@@ -532,10 +560,18 @@ bool process_instruction(size_t instr_index, const std::vector<rabbitizer::Instr
+             print_line("return RspExitReason::Broke", instr_vram);
+             break;
+         case InstrId::rsp_mfc0:
++            if (g_cop0_hooks) {
++                print_line("{}{} = RSP_MFC0({})", ctx_gpr_prefix(rt), rt, rd);
++                break;
++            }
+             print_line("{}{} = {}", ctx_gpr_prefix(rt), rt, expected_c0_reg_value(rd));
+             break;
+         case InstrId::rsp_mtc0:
+             {
++                if (g_cop0_hooks && !cop0_reg_is_dma(rd)) {
++                    print_line("RSP_MTC0({}, {}{})", rd, ctx_gpr_prefix(rt), rt);
++                    break;
++                }
+                 std::string_view write_action = c0_reg_write_action(rd);
+                 if (has_overlays && is_c0_reg_write_dma_read(rd)) {
+                     // DMA read, do overlay swap if reading into IMEM
+@@ -553,8 +589,9 @@ bool process_instruction(size_t instr_index, const std::vector<rabbitizer::Instr
+                 break;
+             }
+         default:
+-            fmt::print(stderr, "Unhandled instruction: {}\n", instr.getOpcodeName());
++            fmt::print(stderr, "Unhandled instruction: {} (vram 0x{:04X})\n", instr.getOpcodeName(), instr_vram);
+             assert(false);
++            g_had_error = true;   // WDC patch: o assert some no Release e o retorno era ignorado => saida incompleta com exit 0
+             return false;
+         }
+     }
+@@ -635,6 +672,10 @@ struct RSPRecompilerConfig {
+     std::string output_function_name;
+     std::vector<uint32_t> extra_indirect_branch_targets;
+     std::unordered_set<uint32_t> unsupported_instructions;
++    bool persist_state = false;       // WDC patch
++    bool cop0_hooks = false;          // WDC patch: acessos a COP0 (exceto DMA) viram RSP_MFC0/RSP_MTC0
++    std::vector<uint32_t> label_hooks; // WDC patch: enderecos com RSP_LABEL_HIT (opcional)
++    std::string extra_include;        // WDC patch: #include adicional (apos os de librecomp) no arquivo gerado
+     std::vector<RSPRecompilerOverlaySlotConfig> overlay_slots;
+ };
+ 
+@@ -735,6 +776,21 @@ bool read_config(const std::filesystem::path& config_path, RSPRecompilerConfig&
+             ret.extra_indirect_branch_targets = toml_to_vec<uint32_t>(branch_targets_array);
+         }
+ 
++        // WDC patch (optional): modelo de hardware do RSP/RDP fornecido pelo projeto
++        if (std::optional<bool> cop0_hooks = config_data["cop0_hooks"].value<bool>(); cop0_hooks.has_value()) {
++            ret.cop0_hooks = cop0_hooks.value();
++        }
++        if (std::optional<bool> persist_state = config_data["persist_state"].value<bool>(); persist_state.has_value()) {
++            ret.persist_state = persist_state.value();
++        }
++        if (std::optional<std::string> extra_include = config_data["extra_include"].value<std::string>(); extra_include.has_value()) {
++            ret.extra_include = extra_include.value();
++        }
++
++        if (const toml::node_view label_hooks = config_data["label_hooks"]; label_hooks.is_array()) {
++            ret.label_hooks = toml_to_vec<uint32_t>(label_hooks.as_array());
++        }
++
+         // Unsupported_instructions (optional)
+         const toml::node_view unsupported_instructions_data = config_data["unsupported_instructions"];
+         if (unsupported_instructions_data.is_array()) {
+@@ -1053,16 +1109,19 @@ void create_function(const std::string& function_name, std::ofstream& output_fil
+ 
+         fmt::print(output_file, "    r1 = 0xFC0;\n");
+     } else {
++        // WDC patch (`persist_state = true`): os registradores escalares e todo o estado do VU (registradores vetoriais, acumuladores,
++        // VCO/VCC/VCE) viram `static`: no hardware eles PERSISTEM entre tarefas, ao contrario do padrao (tudo zerado a cada chamada).
++        const char* st = g_persist_state ? "static " : "";
+         fmt::print(output_file,
+-            "RspExitReason {}(uint8_t* rdram, [[maybe_unused]] uint32_t ucode_addr) {{\n"
+-            "    uint32_t           r1 = 0,  r2 = 0,  r3 = 0,  r4 = 0,  r5 = 0,  r6 = 0,  r7 = 0;\n"
+-            "    uint32_t  r8 = 0,  r9 = 0, r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;\n"
+-            "    uint32_t r16 = 0, r17 = 0, r18 = 0, r19 = 0, r20 = 0, r21 = 0, r22 = 0, r23 = 0;\n"
+-            "    uint32_t r24 = 0, r25 = 0, r26 = 0, r27 = 0, r28 = 0, r29 = 0, r30 = 0, r31 = 0;\n"
++            "RspExitReason {0}(uint8_t* rdram, [[maybe_unused]] uint32_t ucode_addr) {{\n"
++            "    {1}uint32_t           r1 = 0,  r2 = 0,  r3 = 0,  r4 = 0,  r5 = 0,  r6 = 0,  r7 = 0;\n"
++            "    {1}uint32_t  r8 = 0,  r9 = 0, r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;\n"
++            "    {1}uint32_t r16 = 0, r17 = 0, r18 = 0, r19 = 0, r20 = 0, r21 = 0, r22 = 0, r23 = 0;\n"
++            "    {1}uint32_t r24 = 0, r25 = 0, r26 = 0, r27 = 0, r28 = 0, r29 = 0, r30 = 0, r31 = 0;\n"
+             "    uint32_t dma_mem_address = 0, dma_dram_address = 0, jump_target = 0;\n"
+             "    const char * debug_file = NULL; int debug_line = 0;\n"
+-            "    RSP rsp{{}};\n"
+-            "    r1 = 0xFC0;\n", function_name);
++            "    {1}RSP rsp{{}};\n"
++            "    r1 = 0xFC0;\n", function_name, st);
+     }
+     // Write each instruction
+     for (size_t instr_index = 0; instr_index < instrs.size(); instr_index++) {
+@@ -1095,6 +1154,9 @@ int main(int argc, const char** argv) {
+         fmt::print("Failed to parse config file {}\n", argv[0]);
+         std::exit(EXIT_FAILURE);
+     }
++    g_cop0_hooks = config.cop0_hooks;
++    g_persist_state = config.persist_state;
++    g_label_hooks.insert(config.label_hooks.begin(), config.label_hooks.end());
+ 
+     std::vector<uint32_t> instr_words{};
+     std::vector<OverlaySlot> overlay_slots{};
+@@ -1178,7 +1240,10 @@ int main(int argc, const char** argv) {
+     fmt::print(output_file,
+         "#include \"librecomp/rsp.hpp\"\n"
+         "#include \"librecomp/rsp_vu_impl.hpp\"\n");
+-    
++    if (!config.extra_include.empty()) {
++        fmt::print(output_file, "#include \"{}\"\n", config.extra_include);
++    }
++
+     // Write function(s)
+     if (overlay_slots.empty()) {
+         create_function(config.output_function_name, output_file, instrs, config, resume_targets, false, false);
+@@ -1187,10 +1252,14 @@ int main(int argc, const char** argv) {
+         create_function(config.output_function_name + "_initial", output_file, instrs, config, ResumeTargets{}, true, true);
+ 
+         for (const auto& permutation : func_permutations) {
+-            create_function(config.output_function_name + make_permutation_string(permutation.permutation), 
++            create_function(config.output_function_name + make_permutation_string(permutation.permutation),
+                 output_file, permutation.instrs, config, resume_targets, true, false);
+         }
+     }
+ 
++    if (g_had_error) {
++        fmt::print(stderr, "RSPRecomp: instrucoes nao tratadas; a saida {} esta INCOMPLETA\n", config.output_file_path.string());
++        return EXIT_FAILURE;
++    }
+     return 0;
+ }
