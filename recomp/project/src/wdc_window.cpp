@@ -206,6 +206,7 @@ void wdc_window_present(const uint8_t* rgba, unsigned w, unsigned h, int64_t t_v
     if (g_hwnd && !g_present_pending.exchange(true)) PostMessageW(g_hwnd, WM_WDC_PRESENT, 0, 0);
 }
 
+bool wdc_window_foreground() { return g_hwnd && GetForegroundWindow() == g_hwnd; }
 bool wdc_window_closed() { return g_closed.load(); }
 bool wdc_window_key(int vk) { return vk >= 0 && vk < 256 && g_keys[vk].load(); }
 

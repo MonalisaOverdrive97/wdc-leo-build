@@ -6,6 +6,7 @@
 #include "wdc_rdp_vk.h"
 #include "wdc_config.h"
 #include "wdc_present.h"
+#include "wdc_window.h"
 
 #include <atomic>
 #include <chrono>
@@ -31,6 +32,8 @@ bool wdc_post_dp();     // wdc_runtime_stubs.cpp
 uint64_t wdc_vi_ticks();           // main.cpp
 uint64_t wdc_vi_updates_done();    // main.cpp
 double wdc_now_s();     // main.cpp
+
+namespace RDP { extern bool g_wdc_point_sampling; }   // rdp_device.cpp (patch WDC)
 
 namespace {
 struct Job {
@@ -136,7 +139,7 @@ struct FlickFrame { std::vector<RDP::RGBA> px; std::vector<uint8_t> grid; unsign
 uint32_t g_cimg_cur = 0; uint64_t g_ndraw_since = 0;   // color image corrente e comandos de desenho (triangulos, rects, fill) desde o scanout anterior
 std::vector<uint32_t> g_cimg_since;   // enderecos de SET_COLOR_IMAGE vistos nos comandos processados desde o scanout anterior (so a thread do RDP)
 FlickFrame g_ff[3];            // [0] = N-2, [1] = N-1, [2] = N (mais recente)
-uint64_t g_flick_frames = 0, g_flick_found = 0, g_flick_big = 0;
+uint64_t g_flick_frames = 0, g_flick_found = 0, g_flick_big = 0, g_flick_found2 = 0;
 
 std::vector<uint8_t> make_grid(const std::vector<RDP::RGBA>& px, unsigned w, unsigned h) {
     std::vector<uint8_t> g((size_t)kGW * kGH, 0);
@@ -166,6 +169,28 @@ void flicker_feed(const std::vector<RDP::RGBA>& px, unsigned w, unsigned h) {
     FlickFrame& f = g_ff[2];
     f.px = px; f.w = w; f.h = h; f.grid = make_grid(px, w, h);
     f.origin = g_vi_latest[1]; f.status = g_vi_latest[0]; f.t = wdc_now_s(); f.n = ++g_flick_frames; f.drawn = g_cimg_since; g_cimg_since.clear(); f.cimg_cur = g_cimg_cur; f.ndraw = g_ndraw_since; g_ndraw_since = 0;
+    {   // padrao de DOIS quadros intrusos (A,X,Y,B: X e Y diferem muito de A e de B, A ~ B, X ~ Y): o filtro de 1 quadro nao pega esse caso
+        static std::vector<uint8_t> r4g[4];
+        static std::vector<RDP::RGBA> r4p[4];
+        static unsigned r4w[4] = {0, 0, 0, 0}, r4h[4] = {0, 0, 0, 0};
+        for (int k = 0; k < 3; k++) { r4g[k] = std::move(r4g[k + 1]); r4p[k] = std::move(r4p[k + 1]); r4w[k] = r4w[k + 1]; r4h[k] = r4h[k + 1]; }
+        r4g[3] = f.grid; r4p[3] = px; r4w[3] = w; r4h[3] = h;
+        if (!r4g[0].empty() && r4w[0] == w && r4w[1] == w && r4w[2] == w && r4h[0] == h && r4h[1] == h && r4h[2] == h) {
+            const double dax = grid_mad(r4g[0], r4g[1]), dby = grid_mad(r4g[2], r4g[3]), dab = grid_mad(r4g[0], r4g[3]), dxy = grid_mad(r4g[1], r4g[2]);
+            if (dax > g_flick_T && dby > g_flick_T && dab < 0.5 * std::min(dax, dby) && dxy < 0.5 * std::min(dax, dby)) {
+                g_flick_found2++;
+                std::printf("[flicker2 %7.2fs] DOIS quadros intrusos #%llu: d(A,X)=%.1f d(Y,B)=%.1f d(A,B)=%.1f d(X,Y)=%.1f\n", wdc_now_s(), (unsigned long long)g_flick_found2, dax, dby, dab, dxy);
+                if (g_flick_found2 <= 20) {
+                    char path[600];
+                    const char* nm[4] = {"a", "x", "y", "b"};
+                    for (int k = 0; k < 4; k++) {
+                        std::snprintf(path, sizeof path, "%s/flicker2_%04llu_%s.png", g_flick_dir, (unsigned long long)g_flick_found2, nm[k]);
+                        write_png(path, r4p[k], r4w[k], r4h[k]);
+                    }
+                }
+            }
+        }
+    }
     if (g_ff[0].grid.empty() || g_ff[0].w != w || g_ff[1].w != w || g_ff[0].h != h || g_ff[1].h != h) return;
     const double d21 = grid_mad(g_ff[0].grid, g_ff[1].grid), d10 = grid_mad(g_ff[1].grid, g_ff[2].grid), d20 = grid_mad(g_ff[0].grid, g_ff[2].grid);
     if (d21 > g_flick_T) g_flick_big++;
@@ -224,6 +249,17 @@ void do_scanout(bool want_shot, int64_t t_vi_us) {
     for (int r = 0; r < 14; r++) g_proc->set_vi_register((RDP::VIRegister)r, g_vi_latest[r]);
     RDP::ScanoutOptions opts;
     opts.persist_frame_on_invalid_input = true;
+    {   // Filtros do VI que o ParaLLEl-RDP reproduz (o N64 aplicava todos). WDC_VI_OFF=aa,scale,serrate,dither,divot,gamma desliga os listados (ferramenta de teste, vale em qualquer modo)
+        static const char* off = std::getenv("WDC_VI_OFF");
+        auto has = [&](const char* k) { return off && std::strstr(off, k) != nullptr; };
+        if (has("aa")) opts.vi.aa = false;
+        if (has("scale")) opts.vi.scale = false;
+        if (has("serrate")) opts.vi.serrate = false;
+        if (has("dither")) opts.vi.dither_filter = false;
+        if (has("divot")) opts.vi.divot_filter = false;
+        if (has("gamma")) opts.vi.gamma_dither = false;
+        if (std::getenv("WDC_VI_WEAVE")) opts.upscale_deinterlacing = false;
+    }
     std::vector<RDP::RGBA> px;
     unsigned w = 0, h = 0;
     g_proc->scanout_sync(px, w, h, opts);
@@ -238,6 +274,17 @@ void do_scanout(bool want_shot, int64_t t_vi_us) {
 }
 
 void process_vi(Job& j) {   // Vi: fim de quadro
+    {   // diagnostico (WDC_VI_LOG=1): registra cada mudanca de modo do VI (STATUS, WIDTH, X/Y scale...)
+        static const bool vl = std::getenv("WDC_VI_LOG") != nullptr;
+        static uint32_t last[14] = {};
+        static int lines = 0;
+        if (vl && lines < 60 && std::memcmp(last, j.vi, sizeof(last)) != 0) {
+            lines++;
+            std::printf("[vi %7.2fs] STATUS=%08X ORIGIN=%08X WIDTH=%u V_INTR=%u V_CUR=%u BURST=%08X V_SYNC=%u H_SYNC=%08X LEAP=%08X H_START=%08X V_START=%08X V_BURST=%08X X_SCALE=%08X Y_SCALE=%08X\n",
+                        wdc_now_s(), j.vi[0], j.vi[1], j.vi[2], j.vi[3], j.vi[4], j.vi[5], j.vi[6], j.vi[7], j.vi[8], j.vi[9], j.vi[10], j.vi[11], j.vi[12], j.vi[13]);
+            std::memcpy(last, j.vi, sizeof(last));
+        }
+    }
     std::memcpy(g_vi_latest, j.vi, sizeof(g_vi_latest));
     g_have_vi = true;
     g_frames++;
@@ -327,9 +374,51 @@ void thread_main() {
             while (i < j.words.size()) {
                 const unsigned n = j.words[i];
                 const uint32_t* w = &j.words[i + 1];
-                {
-                    const uint32_t op = (w[0] >> 24) & 0x3F;
-                    (void)op;
+                {   // diagnostico (WDC_RDPDUMP=<pasta>@<segundo>): grava em texto os comandos do RDP de 2 quadros a partir do instante dado (opcode + palavras dos comandos de estado)
+                    static const char* dd = std::getenv("WDC_RDPDUMP");
+                    static FILE* df = nullptr;
+                    static double t_start = -1.0;
+                    static int frames_left = 2;
+                    if (dd && frames_left > 0) {
+                        if (t_start < 0.0) { const char* at = std::strchr(dd, '@'); t_start = at ? std::atof(at + 1) : 20.0; }
+                        if (!df && wdc_now_s() >= t_start) {
+                            std::string pth(dd, std::strchr(dd, '@') ? (size_t)(std::strchr(dd, '@') - dd) : std::strlen(dd));
+                            df = std::fopen((pth + "/rdp_dump.txt").c_str(), "w");
+                        }
+                        if (df) {
+                            static const char* nm[64] = {};
+                            nm[0x08] = "TRI"; nm[0x09] = "TRI_Z"; nm[0x0A] = "TRI_TEX"; nm[0x0B] = "TRI_TEX_Z"; nm[0x0C] = "TRI_SHADE"; nm[0x0D] = "TRI_SHADE_Z"; nm[0x0E] = "TRI_SHADE_TEX";
+                            nm[0x0F] = "TRI_SHADE_TEX_Z"; nm[0x24] = "TEXRECT"; nm[0x25] = "TEXRECT_FLIP"; nm[0x26] = "SYNC_LOAD"; nm[0x27] = "SYNC_PIPE"; nm[0x28] = "SYNC_TILE";
+                            nm[0x29] = "SYNC_FULL"; nm[0x2D] = "SET_SCISSOR"; nm[0x2F] = "SET_OTHER_MODES"; nm[0x30] = "LOAD_TLUT"; nm[0x32] = "SET_TILE_SIZE"; nm[0x33] = "LOAD_BLOCK";
+                            nm[0x34] = "LOAD_TILE"; nm[0x35] = "SET_TILE"; nm[0x36] = "FILL_RECT"; nm[0x37] = "SET_FILL_COLOR"; nm[0x38] = "SET_FOG_COLOR"; nm[0x39] = "SET_BLEND_COLOR";
+                            nm[0x3A] = "SET_PRIM_COLOR"; nm[0x3B] = "SET_ENV_COLOR"; nm[0x3C] = "SET_COMBINE"; nm[0x3D] = "SET_TEX_IMAGE"; nm[0x3E] = "SET_Z_IMAGE"; nm[0x3F] = "SET_COLOR_IMAGE";
+                            const uint32_t op = (w[0] >> 24) & 0x3F;
+                            std::fprintf(df, "%-16s n=%u", nm[op] ? nm[op] : "?", n);
+                            const unsigned nw = op >= 0x08 && op <= 0x0F ? n : std::min(n, 4u);
+                            for (unsigned q = 0; q < nw && q < n; q++) std::fprintf(df, " %08X", w[q]);
+                            std::fprintf(df, "\n");
+                            if (op == 0x29 && --frames_left == 0) { std::fclose(df); df = nullptr; std::printf("[rdpdump] gravado\n"); }
+                        }
+                    }
+                }
+                {   // diagnostico (WDC_FBTEX=1): quantos desenhos por segundo usam um FRAMEBUFFER como textura (efeitos de blur/feedback do jogo)
+                    static const bool fbdbg = std::getenv("WDC_FBTEX") != nullptr;
+                    if (fbdbg) {
+                        const uint32_t op = (w[0] >> 24) & 0x3F;
+                        static uint32_t timg = 0, cimg = 0;
+                        static uint64_t n_fb = 0, n_other = 0;
+                        static double last_print = 0.0;
+                        if (op == 0x3F && n >= 2) cimg = w[1] & 0xFFFFFF;
+                        if (op == 0x3D && n >= 2) timg = w[1] & 0xFFFFFF;
+                        const bool tex_fb = timg && ((timg - 0x0E3880u) < 0x4B000u || (timg - 0x12E880u) < 0x4B000u);
+                        if (op == 0x24 || op == 0x25 || (op >= 0x0A && op <= 0x0F && (op & 2))) { if (tex_fb) n_fb++; else n_other++; }
+                        const double now = wdc_now_s();
+                        if (now - last_print >= 1.0) {
+                            if (last_print > 0.0 && (n_fb || n_other)) std::printf("[fbtex %6.1fs] desenhos texturizados: %llu com FRAMEBUFFER como textura, %llu com outras; ultimo cimg=%06X timg=%06X\n", now, (unsigned long long)n_fb, (unsigned long long)n_other, cimg, timg);
+                            last_print = now;
+                            n_fb = n_other = 0;
+                        }
+                    }
                 }
                 if (g_flick_dir && ((w[0] >> 24) & 0x3F) == 0x3F && n >= 2) {   // SET_COLOR_IMAGE
                     const uint32_t a = w[1] & 0xFFFFFF;
@@ -346,6 +435,19 @@ void thread_main() {
                     g_sync_wait_total += dt;
                     if (dt > g_sync_wait_max) g_sync_wait_max = dt;
                     g_syncs++;
+                    {   // diagnostico de TRAVADAS: intervalo longo entre dois quadros (SYNC_FULL) fica registrado com o que se sabe na hora
+                        static double last_sync_t = 0.0;
+                        static int hitch_lines = 0;
+                        const double now = wdc_now_s();
+                        if (last_sync_t > 0.0 && g_syncs.load() > 300 && now - last_sync_t > 0.12 && hitch_lines < 60) {
+                            hitch_lines++;
+                            size_t ql = 0;
+                            { std::lock_guard<std::mutex> lk(g_mutex); ql = g_queue.size(); }
+                            std::printf("[hitch %7.2fs] %.0f ms entre dois quadros (espera da GPU neste quadro: %.0f ms; fila do RDP: %zu; janela em primeiro plano: %s)\n", now,
+                                        (now - last_sync_t) * 1000.0, dt * 1000.0, ql, wdc_window_foreground() ? "sim" : "NAO");
+                        }
+                        last_sync_t = now;
+                    }
                     wdc_post_dp();
                 }
                 i += n + 1;
@@ -402,6 +504,9 @@ bool wdc_rdp_vk_init(uint8_t* rdram, size_t rdram_size, int gpu_index) {
     if (!g_proc->device_is_supported()) { std::printf("[rdp-vk] dispositivo nao suporta o ParaLLEl-RDP\n"); g_proc.reset(); return false; }
     g_rdram_ptr = rdram;
     g_gate_on = wdc_cfg().fps60 && std::getenv("WDC_GATE") != nullptr;   // portao de buffer: experimental, desligado por padrao
+    // Enhanced (enhanced.sharp_textures): textura por ponto no lugar do filtro de 3 pontos do N64. As texturas do jogo sao minusculas (32x32/64x32) e ficam muito ampliadas;
+    // o filtro de 3 pontos as espalha na diagonal, o que parece "motion blur" no cenario em movimento (parede, pista). Legacy nao muda. WDC_POINT_TEX=1 forca em qualquer modo (teste).
+    RDP::g_wdc_point_sampling = wdc_cfg().sharp_textures || std::getenv("WDC_POINT_TEX") != nullptr;
     g_deglitch = wdc_cfg().fps60 && !std::getenv("WDC_NO_DEGLITCH");   // filtro de quadro intruso (so Enhanced a 60 Hz)
     g_active = true;
     g_thread = std::thread(thread_main);
@@ -493,8 +598,8 @@ void wdc_rdp_vk_print_stats() {
     std::printf("[rdp-vk] barreira de VI: %llu esperas, %llu estouros de 20 ms%s\n", (unsigned long long)g_barrier_waits.load(), (unsigned long long)g_barrier_timeouts.load(), g_vi_barrier_off ? " (DESLIGADA)" : "");
     if (g_deglitch) std::printf("[rdp-vk] quadros intrusos filtrados (reexibido o anterior): %llu\n", (unsigned long long)g_deglitched.load());
     if (g_gate_on.load()) std::printf("[rdp-vk] portao de buffer: %llu lotes retidos, %llu scanouts adiantados, %llu estouros de 30 ms\n", (unsigned long long)g_gate_holds.load(), (unsigned long long)g_gate_reorders.load(), (unsigned long long)g_gate_timeouts.load());
-    if (g_flick_dir) std::printf("[flicker] quadros analisados: %llu; com salto > %.1f em relacao ao anterior: %llu; QUADROS INTRUSOS (A,X,A'): %llu\n",
-                                 (unsigned long long)g_flick_frames, g_flick_T, (unsigned long long)g_flick_big, (unsigned long long)g_flick_found);
+    if (g_flick_dir) std::printf("[flicker] quadros analisados: %llu; com salto > %.1f em relacao ao anterior: %llu; QUADROS INTRUSOS (A,X,A'): %llu; DOIS quadros (A,X,Y,B): %llu\n",
+                                 (unsigned long long)g_flick_frames, g_flick_T, (unsigned long long)g_flick_big, (unsigned long long)g_flick_found, (unsigned long long)g_flick_found2);
     std::printf("[rdp-vk] comandos enviados a GPU: %llu; SYNC_FULL: %llu (espera media %.2f ms, maxima %.2f ms); quadros: %llu; scanouts: %llu\n",
                 (unsigned long long)g_cmds.load(), (unsigned long long)g_syncs.load(),
                 g_syncs.load() ? 1000.0 * g_sync_wait_total / (double)g_syncs.load() : 0.0, 1000.0 * g_sync_wait_max,

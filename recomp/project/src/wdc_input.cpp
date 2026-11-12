@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "wdc_joy.h"
 #include "wdc_window.h"
 
 #ifndef NOMINMAX
@@ -150,6 +151,7 @@ bool wdc_input_binding_from_text(const std::string& text, uint32_t* out) {
 
 void wdc_input_configure(const WdcConfig& cfg) {
     g_modern = cfg.controls == WdcControls::Modern;
+    wdc_joy_set_maps(cfg.joymap);
     ensure_bindings();
     for (int s = 0; s < 2; s++)
         for (int a = 0; a < WA_COUNT; a++) {
@@ -165,7 +167,7 @@ void wdc_input_configure(const WdcConfig& cfg) {
 }
 
 bool wdc_input_probe_pad(uint32_t* pressed) {
-    if (!ensure_xinput(false)) return false;
+    if (!ensure_xinput(false)) return wdc_joy_probe(pressed);
     for (DWORD i = 0; i < 4; i++) {
         XState st{};
         if (g_xget(i, &st) == ERROR_SUCCESS) {
@@ -173,7 +175,7 @@ bool wdc_input_probe_pad(uint32_t* pressed) {
             return true;
         }
     }
-    return false;
+    return wdc_joy_probe(pressed);   // sem XInput: controles DirectInput (PlayStation, Switch Pro, 8BitDo, genericos)
 }
 
 // Estado do jogo na RDRAM (endereco KSEG0; as palavras ficam na ordem do host: a leitura direta ja devolve o valor logico).
@@ -293,6 +295,15 @@ WdcInput wdc_input_read() {
             if (p.x != 0.f || p.y != 0.f) { out.x = p.x; out.y = p.y; }
         }
     }
+    if (!out.pad_connected) {   // sem XInput: primeiro controle DirectInput (DualSense, DualShock 4, Switch Pro, 8BitDo, genericos)
+        WdcPadRaw r{};
+        if (wdc_joy_read(0, &r)) {
+            const WdcInput p = map_pad(r, racing_now());
+            out.pad_connected = true;
+            out.buttons |= p.buttons;
+            if (p.x != 0.f || p.y != 0.f) { out.x = p.x; out.y = p.y; }
+        }
+    }
     return out;
 }
 
@@ -331,9 +342,17 @@ WdcInput wdc_input_read_pad(unsigned xinput_index) {
         out.x = kx;
         out.y = ky;
     }
-    if (!g_xget || xinput_index > 3) return out;
     XState st{};
-    if (g_xget((DWORD)xinput_index, &st) != ERROR_SUCCESS) return out;
+    if (!g_xget || xinput_index > 3 || g_xget((DWORD)xinput_index, &st) != ERROR_SUCCESS) {   // sem XInput para este jogador: controle DirectInput de mesmo indice
+        WdcPadRaw r{};
+        if (wdc_joy_read(xinput_index, &r)) {
+            const WdcInput p = map_pad(r, racing_now());
+            out.pad_connected = true;
+            out.buttons |= p.buttons;
+            if (p.x != 0.f || p.y != 0.f) { out.x = p.x; out.y = p.y; }
+        }
+        return out;
+    }
     const WdcInput p = map_pad({st.buttons, st.lt, st.rt, st.lx, st.ly, st.rx, st.ry}, racing_now());
     out.pad_connected = true;
     out.buttons |= p.buttons;

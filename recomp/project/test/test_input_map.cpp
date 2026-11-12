@@ -5,6 +5,7 @@
 #include <set>
 #include <windows.h>
 #include "wdc_input.h"
+#include "wdc_joy.h"
 
 static std::set<int> g_down;
 bool wdc_window_key(int vk) { return g_down.count(vk) != 0; }   // substitui a janela
@@ -98,6 +99,19 @@ int main() {
         q = {}; q.xinput_buttons = 0x1000;
         CHECK(wdc_input_map_pad_modern(q, false).buttons == 0x8000);   // fora de corrida: tabela classica
         CHECK(wdc_input_map_pad_modern(q, true).buttons == 0);         // em corrida: A nao faz mais nada no moderno (sobe marcha passou para Y)
+    }
+    // ---- mapas de botoes de controles DirectInput (wdc_joy): perfis, aprendizado e normalizacao ----
+    {
+        CHECK(wdc_joy_map_text(0x2DC8, 0x6012) == "A:0,B:1,X:3,Y:4,LB:6,RB:7,LT:8,RT:9,BACK:10,START:11,L3:13,R3:14");   // perfil 8BitDo/Android
+        CHECK(wdc_joy_map_text(0x054C, 0x0CE6) == "A:1,B:2,X:0,Y:3,LB:4,RB:5,LT:6+ax4m,RT:7+ax5m,BACK:8,START:9,L3:10,R3:11");   // DualSense
+        CHECK(wdc_joy_map_text(0x1234, 0x0001) == "A:0,B:1,X:2,Y:3,LB:4,RB:5,BACK:6,START:7,L3:8,R3:9");   // generico
+        wdc_joy_apply_map(0x1234, 0x0001, "a:2, B:5,LT:ax3p,rt:9+ax2M,zzz:1,X:99");   // minusculas, espacos, nome invalido, indice invalido
+        CHECK(wdc_joy_map_text(0x1234, 0x0001) == "A:2,B:5,LT:ax3p,RT:9+ax2M");
+        CHECK(wdc_joy_map_key(0x2DC8, 0x6012) == "dev_2dc8_6012");
+        std::map<std::string, std::string> mm{{"dev_abcd_0002", "A:7"}};
+        wdc_joy_set_maps(mm);   // os mapas do config substituem os aprendidos nesta sessao
+        CHECK(wdc_joy_map_text(0xABCD, 0x0002) == "A:7");
+        CHECK(wdc_joy_map_text(0x1234, 0x0001) == "A:0,B:1,X:2,Y:3,LB:4,RB:5,BACK:6,START:7,L3:8,R3:9");
     }
     std::printf(fails ? "%d FALHAS\n" : "todos os testes de entrada passaram\n", fails);
     return fails ? 1 : 0;

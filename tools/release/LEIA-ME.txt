@@ -38,8 +38,18 @@ LEGACY    Como no Nintendo 64: recompilação pura. 30 quadros por segundo
 ENHANCED  60 quadros por segundo nas corridas e imagem melhorada: resolução
           interna ampliada, sincronização com o monitor e suavização.
           Botão "IMAGEM..." na tela de configuração: resolução (AUTO, 1x,
-          2x, 4x), tela 4:3 ou esticada, tipo de suavização, V-Sync e
-          abrir em tela cheia. A resolução interna só vale no Enhanced.
+          2x, 4x), TEXTURAS, tela 4:3 ou esticada, tipo de suavização,
+          V-Sync e abrir em tela cheia. A resolução interna e as texturas
+          só valem no Enhanced.
+
+TEXTURAS (só no Enhanced)
+  NÍTIDAS (padrão)  Tira o "borrão de movimento" que aparece na abertura e
+                    nas corridas (paredes e pista esticadas em riscos).
+                    Esse efeito não é do jogo: é o filtro de textura do
+                    Nintendo 64 espalhando texturas minúsculas que ficam
+                    muito ampliadas. As texturas ficam em "pixels" nítidos.
+  ORIGINAL N64      O filtro original do Nintendo 64 (macio, com os riscos).
+  O modo Legacy sempre usa o filtro original.
 
 Cada modo tem o seu próprio "cartão de memória" virtual (saves separados),
 porque gravações e replays de um modo não servem no outro.
@@ -60,6 +70,18 @@ Esquema MODERNO (só durante a corrida; nos menus vale o clássico):
 
 O jogo só usa marchas manuais se OPTIONS > TRANSMISSION estiver em manual.
 
+OUTROS CONTROLES (PlayStation, Switch Pro, 8BitDo, genéricos, Bluetooth)
+  Além do Xbox/XInput, o jogo reconhece controles do Windows em geral
+  (DirectInput), com fio, sem fio ou por Bluetooth: pareie o controle no
+  Windows e abra o jogo. Os botões de controles conhecidos (PlayStation,
+  Nintendo, 8BitDo) já vêm mapeados; os analógicos e o direcional são
+  reconhecidos sozinhos. Se algum botão estiver trocado ou faltando,
+  em PERSONALIZAR... clique em "MAPEAR OUTRO CONTROLE..." (ou aperte M) e
+  siga o assistente: ele pede cada botão, uma vez por modelo de controle.
+  Controles Xbox não precisam disso.
+  Para diagnóstico:  WorldDriverChampionship.exe --joytest  mostra o que o
+  Windows enxerga do controle (botões e eixos que mexem).
+
 "PERSONALIZAR..." na tela de configuração: mude qual botão faz cada coisa
 (clique no botão do meio de uma linha e aperte o botão desejado no controle,
 ou use as setas). "Padrão" restaura os botões originais do esquema.
@@ -74,13 +96,21 @@ Teclado:
 
 ONDE FICAM OS SAVES
 -------------------
-Na pasta  wdc_config  que o jogo cria ao lado do WorldDriverChampionship.exe:
+Os saves ficam numa pasta FIXA, fora da pasta do jogo, e por isso continuam
+valendo quando você troca de versão ou muda o jogo de lugar:
+  %LOCALAPPDATA%\WorldDriverChampionship\saves
+(para abrir: aperte Windows+R, cole esse endereço e dê Enter)
   wdc_pak0.mpk            saves do modo Legacy
   wdc_pak0_enhanced.mpk   saves do modo Enhanced
+  backups\                cópias datadas, feitas toda vez que o jogo abre
+                          (guarda as 10 mais recentes de cada save)
+Se você já tinha saves ao lado do jogo (pasta wdc_config), eles são COPIADOS
+para lá na primeira vez; os originais não são apagados.
+Na pasta  wdc_config  (ao lado do WorldDriverChampionship.exe) ficam só:
   wdc_config.toml         suas escolhas (pode ser editado no Bloco de Notas)
   wdc.z64                 cópia da ROM guardada pelo programa
-Para fazer backup, copie a pasta wdc_config inteira. Para começar do zero,
-apague os arquivos .mpk. Para trocar a ROM, apague wdc.z64.
+Para começar do zero, apague os arquivos .mpk da pasta de saves.
+Para trocar a ROM, apague wdc.z64.
 
 
 PROBLEMAS COMUNS

@@ -20,6 +20,7 @@
 
 #include <windows.h>
 #include <audioclient.h>
+#include <avrt.h>
 #include <mmdeviceapi.h>
 
 extern double wdc_now_s();
@@ -103,6 +104,17 @@ void write_wav(const std::string& path, const std::vector<int16_t>& s, uint32_t 
     std::fclose(f);
 }
 
+// Volume mestre e limitador suave SO na saida para o dispositivo (o WAV de captura e a AI continuam com o sinal original do jogo). O mix do jogo satura em +-32768
+// nas colisoes/motor no talo e soa como "explosao" no alto-falante; -2,5 dB de folga e um joelho suave tiram o pior do pico. WDC_AUDIO_GAIN (0,1 a 1,0) ajusta; 1,0 = sem folga.
+float g_out_gain = 0.75f;
+inline float soft_limit(float x) {
+    const float k = 0.6f, a = std::fabs(x);
+    if (a <= k) return x;
+    const float o = k + (1.f - k) * std::tanh((a - k) / (1.f - k));
+    return x < 0.f ? -o : o;
+}
+std::atomic<uint64_t> g_dev_starved{0};   // vezes em que o dispositivo ficou sem nenhum quadro (a thread de audio atrasou mais que o buffer)
+
 // Preenche `n` quadros do dispositivo (taxa dev_rate), `ch` canais, float32 ou int16.
 void render(void* out, uint32_t n, uint32_t dev_rate, uint32_t ch, bool is_float) {
     std::lock_guard<std::mutex> l(g_mu);
@@ -119,12 +131,14 @@ void render(void* out, uint32_t n, uint32_t dev_rate, uint32_t ch, bool is_float
             else if (g_pend_valid) frame_at(g_pend, 0, a1, b1, li, ri);
             else { a1 = a0; b1 = b0; }
             const float a = (float)g_frac;
-            L = ((1.f - a) * a0 + a * a1) / 32768.f;
-            R = ((1.f - a) * b0 + a * b1) / 32768.f;
+            L = soft_limit((((1.f - a) * a0 + a * a1) / 32768.f) * g_out_gain);
+            R = soft_limit((((1.f - a) * b0 + a * b1) / 32768.f) * g_out_gain);
             g_frac += step;
             while (g_frac >= 1.0 && g_cur_valid) { g_frac -= 1.0; consume_one_locked(); }
         } else if (g_first_t >= 0) {
             g_underruns++;
+            static bool in_gap = false;
+            if (!in_gap) { in_gap = true; static int lines = 0; if (lines++ < 30) std::printf("[audio %7.2fs] AI sem dados: silencio ate o jogo enfileirar mais audio\n", wdc_now_s()); }
         }
         if (is_float) {
             for (uint32_t c = 0; c < ch; c++) of[i * ch + c] = c == 0 ? L : c == 1 ? R : 0.f;
@@ -153,7 +167,14 @@ void device_thread() {
     if (FAILED(hr)) { fail("Activate", hr); goto done; }
     hr = client->GetMixFormat(&wf);
     if (FAILED(hr)) { fail("GetMixFormat", hr); goto done; }
-    hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, wf, nullptr);
+    // buffer de 100 ms (o padrao do modo compartilhado tem so ~22 ms: qualquer atraso da thread de audio vira estalo); preenchemos ate 50 ms a frente
+    hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 1000000, 0, wf, nullptr);
+    if (FAILED(hr)) {   // refaz o cliente com o buffer padrao
+        client->Release();
+        client = nullptr;
+        hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&client);
+        if (SUCCEEDED(hr)) hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0, 0, wf, nullptr);
+    }
     if (FAILED(hr)) { fail("Initialize", hr); goto done; }
     ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     client->SetEventHandle(ev);
@@ -170,12 +191,16 @@ void device_thread() {
         std::printf("[audio] WASAPI ativo: %lu Hz, %u canais, %s, buffer %u quadros\n", (unsigned long)wf->nSamplesPerSec, (unsigned)wf->nChannels,
                     is_float ? "float32" : "int16", buf_frames);
         g_dev_ok = true;
+        DWORD mmcss_task = 0;
+        HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &mmcss_task);   // prioridade de multimidia: o Windows nao deixa a thread de audio ser atrasada por carga
         client->Start();
+        const UINT32 target = std::min<UINT32>(buf_frames, (UINT32)((double)wf->nSamplesPerSec * 0.050));
         while (!g_stop) {
             WaitForSingleObject(ev, 100);
             UINT32 pad = 0;
             if (FAILED(client->GetCurrentPadding(&pad))) break;
-            const UINT32 n = buf_frames - pad;
+            if (pad == 0 && g_cur_valid) { const uint64_t k = ++g_dev_starved; if (k <= 20) std::printf("[audio %7.2fs] dispositivo sem quadros (thread de audio atrasada)\n", wdc_now_s()); }
+            const UINT32 n = target > pad ? target - pad : 0;
             if (!n) continue;
             BYTE* data = nullptr;
             if (FAILED(rc->GetBuffer(n, &data))) break;
@@ -183,6 +208,7 @@ void device_thread() {
             rc->ReleaseBuffer(n, 0);
         }
         client->Stop();
+        if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
     }
 done:
     if (rc) rc->Release();
@@ -198,6 +224,7 @@ done:
 
 void wdc_audio_init(const char* wav_path, bool real_output) {
     if (wav_path) g_wav_path = wav_path;
+    if (const char* e = std::getenv("WDC_AUDIO_GAIN")) g_out_gain = std::max(0.1f, std::min(1.0f, (float)std::atof(e)));
     g_real = real_output;
     if (real_output) {
         g_dev_thread = std::thread(device_thread);
@@ -259,11 +286,11 @@ void wdc_audio_shutdown() {
     std::lock_guard<std::mutex> l(g_mu);
     const double secs = g_rate.load() ? (double)g_frames_played / g_rate.load() : 0.0;
     std::printf("[audio] osAiSetNextBuffer: %llu chamadas (%llu recusadas por AI cheia), %llu quadros enfileirados; osAiGetStatus: %llu; "
-                "tocados %llu quadros (%.2f s a %u Hz); pico %d; RMS %.1f; quadros nao nulos %llu; saida real: %s; faltas no dispositivo: %llu\n",
+                "tocados %llu quadros (%.2f s a %u Hz); pico %d; RMS %.1f; quadros nao nulos %llu; saida real: %s; faltas no dispositivo: %llu; vezes sem quadros no dispositivo: %llu\n",
                 (unsigned long long)g_calls, (unsigned long long)g_rejected, (unsigned long long)g_frames_in, (unsigned long long)g_status_calls,
                 (unsigned long long)g_frames_played, secs, (unsigned)g_rate.load(), g_peak,
                 g_frames_played ? std::sqrt(g_sumsq / (2.0 * (double)g_frames_played)) : 0.0, (unsigned long long)g_nonzero, g_real ? "sim" : "nao",
-                (unsigned long long)g_underruns);
+                (unsigned long long)g_underruns, (unsigned long long)g_dev_starved.load());
     if (g_calls) std::printf("[audio] primeira entrega em %.2fs, ultima em %.2fs\n", g_first_t, g_last_t);
     if (!g_wav_path.empty()) {
         write_wav(g_wav_path, g_wav, g_rate.load());

@@ -97,6 +97,8 @@ add_executable(wdc_recomp
     src/wdc_present.cpp
     src/wdc_setup.cpp
     src/wdc_rom.cpp
+    src/wdc_saves.cpp
+    src/wdc_joy.cpp
     src/wdc.rc
     "${WDC_ROOT}/recomp/rsp/RecompiledUcode/wdc_ucode.cpp"   # ucode grafico recompilado (RSPRecomp patchado; ver recomp/rsp/wdc_ucode.toml)
     "${WDC_ROOT}/recomp/runtime_glue/wdc_runtime_stubs.cpp"
@@ -169,4 +171,4 @@ if (WDC_RDP_VK)
     target_link_libraries(wdc_recomp PRIVATE parallel_rdp)
 endif()
 
-target_link_libraries(wdc_recomp PRIVATE librecomp ultramodern ole32 user32 gdi32 d3d11 dxgi d3dcompiler gdiplus shlwapi comdlg32 shell32 uuid)   # ole32: WASAPI (wdc_audio.cpp); user32/gdi32: janela (wdc_window.cpp); d3d11/dxgi/d3dcompiler: apresentador em GPU (wdc_present.cpp)
+target_link_libraries(wdc_recomp PRIVATE librecomp ultramodern ole32 user32 gdi32 d3d11 dxgi d3dcompiler gdiplus shlwapi comdlg32 shell32 uuid avrt dinput8 dxguid)   # ole32: WASAPI (wdc_audio.cpp); user32/gdi32: janela (wdc_window.cpp); d3d11/dxgi/d3dcompiler: apresentador em GPU (wdc_present.cpp)

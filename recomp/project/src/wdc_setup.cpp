@@ -13,6 +13,7 @@
 
 #include "wdc_config.h"
 #include "wdc_input.h"
+#include "wdc_joy.h"
 #include "wdc_setup_art.h"
 #include "wdc_version.h"
 
@@ -37,19 +38,20 @@ const Color kYellow(255, 247, 196, 0), kRed(255, 214, 40, 40);
 const Color kText(255, 236, 238, 242), kMuted(255, 150, 156, 168), kDim(255, 98, 103, 114);
 const Color kCard(255, 30, 34, 42), kCardHover(255, 38, 43, 53), kCardSel(255, 48, 42, 14);
 
-enum class Page { Main, Controls, Image };
+enum class Page { Main, Controls, Image, Wizard };
 
 // ids dos elementos clicaveis
 enum Id : int {
     IdNone = -1,
     IdMode0 = 0, IdMode1, IdCtl0, IdCtl1, IdPlay, IdQuit, IdImagePage, IdCustomPage,   // pagina principal
     IdShortcut,                                                                       // pagina principal: atalho na area de trabalho
+    IdWizard, IdWizSkip,                                                              // mapear controle: abrir o assistente / pular o botao atual
     IdBack, IdDefaults,                                                               // paginas internas: OK e Restaurar padrao
     IdTab0, IdTab1,                                                                   // personalizar: esquema que esta sendo editado
     IdImg = 100,                                                                      // imagem: IdImg + grupo * 10 + opcao
     IdRowBtn = 200, IdRowPrev = 210, IdRowNext = 220,                                 // personalizar: + indice da acao
 };
-enum ImgGroup { GScale = 0, GAspect, GFilter, GVsync, GFull, GCount };
+enum ImgGroup { GScale = 0, GSharp, GAspect, GFilter, GVsync, GFull, GCount };
 
 struct Widget { RectF r; int id; };
 
@@ -60,7 +62,7 @@ struct Setup {
     int sel_mode = 0;               // 0 Legacy, 1 Enhanced
     int sel_ctl = 0;                // 0 Classico, 1 Moderno
     // imagem (indices das opcoes mostradas)
-    int img[GCount] = {0, 0, 0, 0, 0};   // GScale: 0 auto,1 1x,2 2x,3 4x | GAspect: 0 4:3,1 esticar | GFilter: 0 nitido,1 suave,2 pixels,3 bicubico | GVsync: 0 ligada,1 desligada | GFull: 0 janela,1 tela cheia
+    int img[GCount] = {0, 0, 0, 0, 0, 0};   // GScale: 0 auto,1 1x,2 2x,3 4x | GSharp: 0 nitidas,1 original N64 | GAspect: 0 4:3,1 esticar | GFilter: 0 nitido,1 suave,2 pixels,3 bicubico | GVsync: 0 ligada,1 desligada | GFull: 0 janela,1 tela cheia
     bool filter_touched = false;
     // controles personalizados
     int ed_scheme = 0;              // esquema em edicao (0 classico, 1 moderno)
@@ -71,6 +73,16 @@ struct Setup {
     bool pad_present = false;
     int hover = IdNone;
     int shortcut_state = 0;         // 0 = nao criado, 1 = criado, 2 = falhou
+    // assistente "Mapear controle" (controles que nao sao XInput)
+    std::filesystem::path config_dir;
+    int wiz_step = 0;               // 0..11 (A, B, X, Y, LB, RB, LT, RT, BACK, START, L3, R3); 12 = fim
+    std::string wiz_val[12];        // texto de cada botao ("3", "ax4m", "")
+    bool wiz_release = true;        // esperando soltar tudo antes de ouvir o proximo botao
+    bool wiz_have_pad = false;
+    long wiz_base[8] = {};          // posicao de repouso dos eixos (lida quando tudo esta solto)
+    uint16_t wiz_vid = 0, wiz_pid = 0;
+    char wiz_name[128] = {};
+    int wiz_msg = 0;                // 1 = mapeado com sucesso
     bool play = false;
     bool done = false;
     ULONG_PTR gdip = 0;
@@ -232,8 +244,8 @@ void img_group(Graphics& gr, int grp, float y, const wchar_t* title, const wchar
     const float x0 = S(kX0), w = S(kPW), gapx = S(8);
     text(gr, title, L"Segoe UI", S(12), FontStyleBold, kRed, x0, S(y));
     const float cw = (w - gapx * (n - 1)) / n;
-    for (int i = 0; i < n; i++) chip(gr, IdImg + grp * 10 + i, RectF(x0 + i * (cw + gapx), S(y + 20), cw, S(34)), labels[i], g.img[grp] == i, dim);
-    text(gr, caption, L"Segoe UI", S(12), FontStyleRegular, dim ? kDim : kMuted, x0, S(y + 59), w);
+    for (int i = 0; i < n; i++) chip(gr, IdImg + grp * 10 + i, RectF(x0 + i * (cw + gapx), S(y + 19), cw, S(30)), labels[i], g.img[grp] == i, dim);
+    text(gr, caption, L"Segoe UI", S(12), FontStyleRegular, dim ? kDim : kMuted, x0, S(y + 53), w);
 }
 
 void paint_image(Graphics& gr) {
@@ -247,14 +259,21 @@ void paint_image(Graphics& gr) {
             L"Resolução original do Nintendo 64 (a mais leve).",
             L"Boa e leve: roda bem até em placas integradas.",
             L"Alta: bordas e texturas bem mais nítidas. Para placa dedicada."};
-        img_group(gr, GScale, 138, legacy ? L"RESOLUÇÃO INTERNA   (só vale no modo Enhanced)" : L"RESOLUÇÃO INTERNA", L_, 4,
+        img_group(gr, GScale, 134, legacy ? L"RESOLUÇÃO INTERNA   (só vale no modo Enhanced)" : L"RESOLUÇÃO INTERNA", L_, 4,
                   legacy ? L"No modo Legacy a imagem usa a resolução original; esta escolha vale quando você usar o Enhanced." : cap[g.img[GScale]], legacy);
+    }
+    {   // texturas
+        static const wchar_t* L_[] = {L"NÍTIDAS", L"ORIGINAL N64"};
+        static const wchar_t* cap[] = {L"Sem o borrão e os riscos do filtro do N64 nas texturas ampliadas (parede, pista).",
+                                       L"Filtro de 3 pontos do N64: macio, com riscos no cenário em movimento."};
+        img_group(gr, GSharp, 206, legacy ? L"TEXTURAS   (só vale no modo Enhanced)" : L"TEXTURAS", L_, 2,
+                  legacy ? L"No modo Legacy as texturas usam o filtro original do N64; esta escolha vale no Enhanced." : cap[g.img[GSharp]], legacy);
     }
     {   // tela
         static const wchar_t* L_[] = {L"4:3 ORIGINAL", L"ESTICAR"};
         static const wchar_t* cap[] = {L"Mantém a proporção do jogo, com barras pretas nas laterais.",
                                        L"Preenche toda a janela. Em telas largas a imagem fica esticada."};
-        img_group(gr, GAspect, 224, L"TELA", L_, 2, cap[g.img[GAspect]], false);
+        img_group(gr, GAspect, 278, L"TELA", L_, 2, cap[g.img[GAspect]], false);
     }
     {   // suavizacao
         static const wchar_t* L_[] = {L"NÍTIDO", L"SUAVE", L"PIXELS", L"BICÚBICO"};
@@ -262,19 +281,19 @@ void paint_image(Graphics& gr) {
                                        L"Imagem mais macia (filtro bilinear).",
                                        L"Pixels quadrados, sem nenhum filtro.",
                                        L"O mais bonito ao ampliar: contornos limpos e curvas suaves."};
-        img_group(gr, GFilter, 310, L"SUAVIZAÇÃO AO AMPLIAR PARA A JANELA", L_, 4, cap[g.img[GFilter]], false);
+        img_group(gr, GFilter, 350, L"SUAVIZAÇÃO AO AMPLIAR PARA A JANELA", L_, 4, cap[g.img[GFilter]], false);
     }
     {   // v-sync
         static const wchar_t* L_[] = {L"LIGADO", L"DESLIGADO"};
         static const wchar_t* cap[] = {L"Sincroniza com o monitor: sem rasgos na imagem (recomendado).",
                                        L"Menor atraso. Use só com monitor G-Sync/FreeSync; pode rasgar a imagem."};
-        img_group(gr, GVsync, 396, L"SINCRONIZAÇÃO VERTICAL (V-SYNC)", L_, 2, cap[g.img[GVsync]], false);
+        img_group(gr, GVsync, 422, L"SINCRONIZAÇÃO VERTICAL (V-SYNC)", L_, 2, cap[g.img[GVsync]], false);
     }
     {   // tela cheia
         static const wchar_t* L_[] = {L"JANELA", L"TELA CHEIA"};
         static const wchar_t* cap[] = {L"Abre numa janela. F11 alterna para tela cheia durante o jogo.",
                                        L"Abre em tela cheia. F11 volta para a janela durante o jogo."};
-        img_group(gr, GFull, 482, L"AO ABRIR O JOGO", L_, 2, cap[g.img[GFull]], false);
+        img_group(gr, GFull, 494, L"AO ABRIR O JOGO", L_, 2, cap[g.img[GFull]], false);
     }
     button(gr, IdBack, RectF(x0, S(kH - 78 + 8), w * 0.62f, S(48 - 4)), L"OK", true);
     button(gr, IdDefaults, RectF(x0 + w * 0.62f + S(14), S(kH - 78 + 8), w * 0.38f - S(14), S(48 - 4)), L"Padrão", false);
@@ -301,6 +320,7 @@ std::wstring bind_label(uint32_t m) {
 void paint_controls(Graphics& gr) {
     const float x0 = S(kX0), w = S(kPW);
     text(gr, L"PERSONALIZAR CONTROLES", L"Impact", S(22), FontStyleRegular, kText, x0, S(98));
+    pill(gr, IdWizard, RectF(x0 + w - S(210), S(98), S(210), S(26)), g.wiz_msg == 1 ? L"CONTROLE MAPEADO ✓" : L"MAPEAR OUTRO CONTROLE…  [M]");
     {   // esquema em edicao
         const float gapx = S(8), cw = (w - gapx) / 2;
         chip(gr, IdTab0, RectF(x0, S(134), cw, S(34)), L"CLÁSSICO  [1]", g.ed_scheme == 0);
@@ -337,6 +357,45 @@ void paint_controls(Graphics& gr) {
     text(gr, L"Enter/Esc voltam  •  as escolhas são gravadas ao apertar JOGAR", L"Segoe UI", S(11), FontStyleRegular, kMuted, x0, S(kH - 22));
 }
 
+// ============================ assistente: mapear controle ============================
+const wchar_t* kWizPrompt[12] = {L"A", L"B", L"X", L"Y", L"LB", L"RB", L"LT", L"RT", L"VOLTAR (BACK)", L"START", L"L3", L"R3"};
+const wchar_t* kWizHint[12] = {L"Botão de BAIXO do lado direito (✕ no PlayStation)", L"Botão da DIREITA (○ no PlayStation)", L"Botão da ESQUERDA (□ no PlayStation)",
+                               L"Botão de CIMA (△ no PlayStation)", L"Gatilho de cima, lado esquerdo (L1 / LB)", L"Gatilho de cima, lado direito (R1 / RB)",
+                               L"Gatilho de baixo, lado esquerdo (L2 / LT)", L"Gatilho de baixo, lado direito (R2 / RT)", L"Select / Share / Voltar (pequeno, à esquerda)",
+                               L"Start / Options / Menu (pequeno, à direita)", L"CLIQUE no analógico esquerdo (apertar para baixo)", L"CLIQUE no analógico direito (apertar para baixo)"};
+
+void paint_wizard(Graphics& gr) {
+    const float x0 = S(kX0), w = S(kPW);
+    text(gr, L"MAPEAR CONTROLE", L"Impact", S(22), FontStyleRegular, kText, x0, S(98));
+    if (!g.wiz_have_pad) {
+        text(gr, L"Nenhum controle encontrado.", L"Segoe UI", S(16), FontStyleBold, kYellow, x0, S(150), w);
+        text(gr, L"Ligue o controle (ou pareie por Bluetooth), espere o Windows reconhecer", L"Segoe UI", S(13), FontStyleRegular, kText, x0, S(184), w);
+        text(gr, L"e aperte um botão. Controles de Xbox não precisam de mapeamento.", L"Segoe UI", S(13), FontStyleRegular, kText, x0, S(206), w);
+    } else {
+        wchar_t nm[160];
+        MultiByteToWideChar(CP_UTF8, 0, g.wiz_name, -1, nm, 160);
+        text(gr, nm, L"Segoe UI", S(12), FontStyleRegular, kMuted, x0, S(132), w);
+        if (g.wiz_step < 12) {
+            text(gr, L"APERTE", L"Segoe UI", S(13), FontStyleBold, kRed, x0, S(168));
+            text(gr, kWizPrompt[g.wiz_step], L"Impact", S(64), FontStyleRegular, kYellow, x0, S(186), w);
+            text(gr, kWizHint[g.wiz_step], L"Segoe UI", S(14), FontStyleRegular, kText, x0, S(278), w);
+            text(gr, g.wiz_release ? L"Solte tudo e espere…" : L"Aperte esse botão agora (e solte).", L"Segoe UI", S(12), FontStyleRegular, g.wiz_release ? kMuted : kYellow, x0, S(304), w);
+        }
+        for (int i = 0; i < 12; i++) {   // progresso: 12 bolinhas
+            const float cx = x0 + S(10) + i * S(40), cy = S(356);
+            SolidBrush b(i < g.wiz_step ? kYellow : (i == g.wiz_step ? Color(255, 255, 255, 255) : Color(255, 58, 63, 75)));
+            gr.FillEllipse(&b, cx, cy, S(16), S(16));
+            if (i < g.wiz_step && g.wiz_val[i].empty()) { Pen p(kDim, S(2.f)); gr.DrawLine(&p, cx + S(3), cy + S(3), cx + S(13), cy + S(13)); }
+            text(gr, i == 8 ? L"BK" : i == 9 ? L"ST" : kWizPrompt[i], L"Segoe UI", S(10), FontStyleBold, i <= g.wiz_step ? kText : kDim, cx - S(8), cy + S(20), S(32), StringAlignmentCenter);
+        }
+        text(gr, L"O direcional e os analógicos são reconhecidos sozinhos.", L"Segoe UI", S(12), FontStyleRegular, kMuted, x0, S(420), w);
+        text(gr, L"Se o controle não tem algum botão, aperte PULAR.", L"Segoe UI", S(12), FontStyleRegular, kMuted, x0, S(440), w);
+    }
+    button(gr, IdWizSkip, RectF(x0, S(kH - 78 + 8), w * 0.38f, S(48 - 4)), L"Pular", false);
+    button(gr, IdBack, RectF(x0 + w * 0.38f + S(14), S(kH - 78 + 8), w * 0.62f - S(14), S(48 - 4)), L"Cancelar", true);
+    text(gr, L"Esc cancela  •  o mapa vale só para este modelo de controle e é gravado na hora", L"Segoe UI", S(11), FontStyleRegular, kMuted, x0, S(kH - 22));
+}
+
 void paint(HDC dc) {
     RECT rc;
     GetClientRect(g.hwnd, &rc);
@@ -367,6 +426,7 @@ void paint(HDC dc) {
     text(gr, L"CHAMPIONSHIP  •  RECOMPILAÇÃO PARA PC", L"Segoe UI", S(12.5f), FontStyleBold, kMuted, x0, S(72));
     if (g.page == Page::Main) paint_main(gr);
     else if (g.page == Page::Image) paint_image(gr);
+    else if (g.page == Page::Wizard) paint_wizard(gr);
     else paint_controls(gr);
 
     Graphics wnd(dc);
@@ -447,9 +507,75 @@ void restore_defaults() {
         for (int a = 0; a < WA_COUNT; a++) g.bind[g.ed_scheme][a] = wdc_input_default_binding(g.ed_scheme, a);
         g.bind_dirty[g.ed_scheme] = true;
     } else if (g.page == Page::Image) {
-        g.img[GScale] = 0; g.img[GAspect] = 0; g.img[GFilter] = g.sel_mode == 1 ? 0 : 1; g.img[GVsync] = 0; g.img[GFull] = 0;
+        g.img[GScale] = 0; g.img[GSharp] = 0; g.img[GAspect] = 0; g.img[GFilter] = g.sel_mode == 1 ? 0 : 1; g.img[GVsync] = 0; g.img[GFull] = 0;
         g.filter_touched = false;
     }
+    redraw();
+}
+
+// ---- assistente: leitura do controle por timer ----
+void wiz_stop() { KillTimer(g.hwnd, 2); }
+
+void wiz_finish() {
+    wiz_stop();
+    std::string t;
+    const char* nm[12] = {"A", "B", "X", "Y", "LB", "RB", "LT", "RT", "BACK", "START", "L3", "R3"};
+    for (int i = 0; i < 12; i++) if (!g.wiz_val[i].empty()) { if (!t.empty()) t += ","; t += std::string(nm[i]) + ":" + g.wiz_val[i]; }
+    wdc_joy_apply_map(g.wiz_vid, g.wiz_pid, t);
+    wdc_cfg_save_value(g.config_dir, "gamepad", wdc_joy_map_key(g.wiz_vid, g.wiz_pid), "\"" + wdc_joy_map_text(g.wiz_vid, g.wiz_pid) + "\"");
+    g.wiz_msg = 1;
+    g.page = Page::Controls;
+    redraw();
+}
+
+void wiz_next() {
+    g.wiz_step++;
+    g.wiz_release = true;
+    if (g.wiz_step >= 12) wiz_finish();
+    else redraw();
+}
+
+void wiz_poll() {
+    WdcJoySnap s;
+    const bool have = wdc_joy_snapshot(&s);
+    if (have != g.wiz_have_pad) { g.wiz_have_pad = have; redraw(); }
+    if (!have) return;
+    if (g.wiz_vid != s.vid || g.wiz_pid != s.pid || !g.wiz_name[0]) { g.wiz_vid = s.vid; g.wiz_pid = s.pid; std::strncpy(g.wiz_name, s.name, sizeof g.wiz_name - 1); redraw(); }
+    int first_btn = -1;
+    for (int i = 0; i < 32; i++) if (s.buttons[i]) { first_btn = i; break; }
+    const bool hat = (s.pov & 0xFFFF) != 0xFFFF;
+    if (g.wiz_release) {   // espera soltar tudo (botoes, direcional e eixos perto do repouso) e guarda o repouso
+        bool still = first_btn < 0 && !hat;
+        if (still) for (int a = 0; a < 8; a++) if (std::labs(s.axes[a] - g.wiz_base[a]) > 6000) still = false;
+        if (still) { g.wiz_release = false; redraw(); return; }
+        if (first_btn < 0 && !hat) { for (int a = 0; a < 8; a++) g.wiz_base[a] = s.axes[a]; }   // sem nada apertado: este e o repouso
+        return;
+    }
+    if (first_btn >= 0) { g.wiz_val[g.wiz_step] = std::to_string(first_btn); wiz_next(); return; }
+    if (g.wiz_step == 6 || g.wiz_step == 7) {   // gatilhos: aceita um eixo (analogico) se nenhum botao veio
+        for (int a = 0; a < 8; a++) {
+            const long d = s.axes[a] - g.wiz_base[a];
+            if (std::labs(d) > 16000 && a != 0 && a != 1) {   // X e Y do analogico esquerdo nunca sao gatilhos
+                const char kind = g.wiz_base[a] < -16000 ? 'm' : g.wiz_base[a] > 16000 ? 'M' : (d > 0 ? 'p' : 'n');
+                g.wiz_val[g.wiz_step] = "ax" + std::to_string(a) + std::string(1, kind);
+                wiz_next();
+                return;
+            }
+        }
+    }
+}
+
+void wiz_start() {
+    stop_capture();
+    g.wiz_step = 0;
+    for (auto& v : g.wiz_val) v.clear();
+    g.wiz_release = true;
+    g.wiz_msg = 0;
+    g.wiz_name[0] = 0;
+    for (long& b : g.wiz_base) b = 0;
+    g.page = Page::Wizard;
+    SetTimer(g.hwnd, 2, 30, nullptr);
+    wiz_poll();
     redraw();
 }
 
@@ -472,7 +598,9 @@ void click(int id) {
     case IdShortcut: g.shortcut_state = create_desktop_shortcut() ? 1 : 2; break;
     case IdImagePage: go_page(Page::Image); return;
     case IdCustomPage: go_page(Page::Controls); return;
-    case IdBack: go_page(Page::Main); return;
+    case IdBack: if (g.page == Page::Wizard) { wiz_stop(); g.page = Page::Controls; redraw(); return; } go_page(Page::Main); return;
+    case IdWizard: wiz_start(); return;
+    case IdWizSkip: if (g.page == Page::Wizard && g.wiz_step < 12) wiz_next(); return;
     case IdDefaults: restore_defaults(); return;
     case IdTab0: stop_capture(); g.ed_scheme = 0; break;
     case IdTab1: stop_capture(); g.ed_scheme = 1; break;
@@ -488,6 +616,7 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_ERASEBKGND: return 1;
     case WM_TIMER:
         if (w == 1 && g.capture >= 0) poll_capture();
+        if (w == 2 && g.page == Page::Wizard) wiz_poll();
         return 0;
     case WM_MOUSEMOVE: {
         const int id = hit_test((short)LOWORD(l), (short)HIWORD(l));
@@ -512,6 +641,11 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             else if (w == VK_DELETE || w == VK_BACK) { const int a = g.capture; stop_capture(); assign(a, 0); redraw(); }
             return 0;
         }
+        if (g.page == Page::Wizard) {
+            if (w == VK_ESCAPE) click(IdBack);
+            else if (w == VK_SPACE || w == VK_RETURN) click(IdWizSkip);
+            return 0;
+        }
         if (g.page == Page::Main) {
             if (w == VK_RETURN) finish(true);
             else if (w == VK_ESCAPE) finish(false);
@@ -523,10 +657,11 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (w == VK_RETURN || w == VK_ESCAPE || w == VK_BACK) go_page(Page::Main);
             else if (g.page == Page::Controls && (w == '1' || w == VK_NUMPAD1)) click(IdTab0);
             else if (g.page == Page::Controls && (w == '2' || w == VK_NUMPAD2)) click(IdTab1);
+            else if (g.page == Page::Controls && w == 'M') click(IdWizard);
         }
         return 0;
     case WM_CLOSE: finish(false); return 0;
-    case WM_DESTROY: KillTimer(h, 1); PostQuitMessage(0); return 0;
+    case WM_DESTROY: KillTimer(h, 1); KillTimer(h, 2); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(h, m, w, l);
 }
@@ -577,6 +712,7 @@ void save_all(const std::filesystem::path& dir) {
         }
     }
     wdc_cfg_save_value(dir, "enhanced", "internal_scale", kScaleText[g.img[GScale]]);
+    wdc_cfg_save_value(dir, "enhanced", "sharp_textures", g.img[GSharp] == 1 ? "false" : "true");
     wdc_cfg_save_value(dir, "display", "aspect", g.img[GAspect] == 1 ? "\"stretch\"" : "\"4:3\"");
     if (g.filter_touched) wdc_cfg_save_value(dir, "display", "filter", kFilterText[g.img[GFilter]]);
     wdc_cfg_save_value(dir, "display", "vsync", g.img[GVsync] == 1 ? "\"off\"" : "\"on\"");
@@ -587,6 +723,7 @@ void save_all(const std::filesystem::path& dir) {
 bool wdc_setup_run(const std::filesystem::path& config_dir, const char* shot_path) {
     SetProcessDPIAware();
     g = Setup{};
+    g.config_dir = config_dir;
     GdiplusStartupInput in;
     if (GdiplusStartup(&g.gdip, &in, nullptr) != Ok) return true;   // sem GDI+: segue sem setup
     {   // dpi
@@ -598,6 +735,7 @@ bool wdc_setup_run(const std::filesystem::path& config_dir, const char* shot_pat
     g.sel_mode = c.enhanced ? 1 : 0;
     g.sel_ctl = c.controls == WdcControls::Modern ? 1 : 0;
     g.img[GScale] = c.scale_choice == 0 ? 0 : c.scale_choice == 1 ? 1 : c.scale_choice == 2 ? 2 : 3;
+    g.img[GSharp] = c.sharp_textures_choice ? 0 : 1;
     g.img[GAspect] = c.aspect == WdcAspect::Stretch ? 1 : 0;
     g.img[GFilter] = c.filter == WdcFilter::Sharp ? 0 : c.filter == WdcFilter::Bilinear ? 1 : c.filter == WdcFilter::Nearest ? 2 : 3;
     g.filter_touched = c.filter_explicit;
@@ -608,6 +746,11 @@ bool wdc_setup_run(const std::filesystem::path& config_dir, const char* shot_pat
         if (!std::strcmp(pg, "image")) g.page = Page::Image;
         else if (!std::strcmp(pg, "controls")) { g.page = Page::Controls; g.ed_scheme = g.sel_ctl; }
         else if (!std::strcmp(pg, "modern")) { g.page = Page::Controls; g.ed_scheme = 1; }
+        else if (!std::strcmp(pg, "wizard")) {   // so desenho (captura de tela de depuracao)
+            g.page = Page::Wizard; g.wiz_have_pad = true; g.wiz_step = 3; g.wiz_release = false;
+            std::strncpy(g.wiz_name, "Controle de exemplo (VID 2DC8 PID 6012)", sizeof g.wiz_name - 1);
+            for (int i = 0; i < 3; i++) g.wiz_val[i] = std::to_string(i);
+        }
     }
     if (IStream* st = SHCreateMemStream(kSetupArt, (UINT)kSetupArtSize)) {
         g.art = Bitmap::FromStream(st);

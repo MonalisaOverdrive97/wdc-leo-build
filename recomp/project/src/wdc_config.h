@@ -4,6 +4,7 @@
 // (v-sync, filtro, apresentador) so mudam como a imagem chega a tela e valem nos dois modos.
 #pragma once
 #include <filesystem>
+#include <map>
 #include <string>
 
 enum class WdcVsync { On, Off };                       // Off = apresenta assim que o quadro fica pronto (com VRR/G-Sync, sem rasgos)
@@ -15,6 +16,8 @@ enum class WdcControls { Classic, Modern };            // esquema de botoes do c
 struct WdcConfig {
     bool enhanced = false;          // modo Enhanced
     bool fps60 = false;             // efetivo: so em Enhanced. Corrida a 60 Hz (demo e replay continuam a 30 Hz)
+    bool sharp_textures_choice = true;   // o que o arquivo/linha de comando pede (padrao ligado), valha ou nao no modo atual (o setup mostra isto)
+    bool sharp_textures = false;    // efetivo: so em Enhanced. Textura amostrada por ponto (sem o filtro de 3 pontos do N64, que espalha texturas ampliadas em riscos)
     int internal_scale = 1;         // efetivo: 1 em Legacy; 1, 2, 4 ou 8 em Enhanced (resolucao interna do RDP)
     WdcVsync vsync = WdcVsync::On;
     WdcFilter filter = WdcFilter::Bilinear;
@@ -28,6 +31,8 @@ struct WdcConfig {
     // Botoes personalizados do controle XInput, por esquema (0 = classico, 1 = moderno) e acao (ver wdc_input.h, WdcAction). Texto cru da chave
     // [controls.classic]/[controls.modern] (ex.: "RT", "B+X", "none"); vazio ou "default" = o padrao do esquema. Interpretado por wdc_input.cpp.
     std::string bind[2][6];
+    // Mapas de botoes aprendidos de controles que nao sao XInput: chave "dev_<vid>_<pid>" -> "A:0,B:1,..." (ver wdc_joy.h; [gamepad] em wdc_config.toml).
+    std::map<std::string, std::string> joymap;
 };
 constexpr int kWdcActions = 6;
 extern const char* const kWdcActionKeys[kWdcActions];   // nomes das chaves: accelerate, brake, soft_brake, shift_up, shift_down, camera

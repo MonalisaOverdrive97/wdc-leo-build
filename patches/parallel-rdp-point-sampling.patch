@@ -1,0 +1,22 @@
+diff --git a/parallel-rdp/rdp_device.cpp b/parallel-rdp/rdp_device.cpp
+index aa0b318..bda7464 100644
+--- a/parallel-rdp/rdp_device.cpp
++++ b/parallel-rdp/rdp_device.cpp
+@@ -471,6 +471,8 @@ void CommandProcessor::op_set_scissor(const uint32_t *words)
+ 	renderer.set_static_rasterization_state(static_state);
+ }
+ 
++bool g_wdc_point_sampling = false; // WDC: amostragem de textura pontual no lugar do filtro de 3 pontos do N64 (experimento/Enhanced)
++
+ void CommandProcessor::op_set_other_modes(const uint32_t *words)
+ {
+ 	STATE_MASK(static_state.flags, bool(words[0] & (1 << 19)), RASTERIZATION_PERSPECTIVE_CORRECT_BIT);
+@@ -479,7 +481,7 @@ void CommandProcessor::op_set_other_modes(const uint32_t *words)
+ 	STATE_MASK(static_state.flags, bool(words[0] & (1 << 16)), RASTERIZATION_TEX_LOD_ENABLE_BIT);
+ 	STATE_MASK(static_state.flags, bool(words[0] & (1 << 15)), RASTERIZATION_TLUT_BIT);
+ 	STATE_MASK(static_state.flags, bool(words[0] & (1 << 14)), RASTERIZATION_TLUT_TYPE_BIT);
+-	STATE_MASK(static_state.flags, bool(words[0] & (1 << 13)), RASTERIZATION_SAMPLE_MODE_BIT);
++	STATE_MASK(static_state.flags, bool(words[0] & (1 << 13)) && !g_wdc_point_sampling, RASTERIZATION_SAMPLE_MODE_BIT);
+ 	STATE_MASK(static_state.flags, bool(words[0] & (1 << 12)), RASTERIZATION_SAMPLE_MID_TEXEL_BIT);
+ 	STATE_MASK(static_state.flags, bool(words[0] & (1 << 11)), RASTERIZATION_BILERP_0_BIT);
+ 	STATE_MASK(static_state.flags, bool(words[0] & (1 << 10)), RASTERIZATION_BILERP_1_BIT);

@@ -48,7 +48,8 @@ std::deque<Frame> g_queue;           // quadros publicados e ainda nao exibidos 
 uint64_t g_seq = 0;                  // numero do ultimo quadro publicado
 double g_base_us = 0.0;              // linha do tempo regular: instante estimado do VI 0
 bool g_base_init = false;
-int g_base_above = 0;                // quadros seguidos com a diferenca muito acima da base
+int g_base_above = 0;
+double g_lag_peak = 20000.0;          // pico (us) do atraso VI -> entrega do quadro, com decaimento lento (folga adaptativa)                // quadros seguidos com a diferenca muito acima da base
 std::atomic<int64_t> g_vblank_us{8333};   // periodo do vblank (media movel dos intervalos entre apresentacoes)
 HANDLE g_new_frame = nullptr;        // evento: ha quadro novo (usado com v-sync desligado)
 
@@ -95,11 +96,14 @@ float3 sample_catmull_rom(float2 uv) {
     float2 pos = uv * texSize;
     float2 c = floor(pos - 0.5) + 0.5;
     float2 f = pos - c;
-    float2 f2 = f * f, f3 = f2 * f;
-    float2 w0 = -0.5 * f3 + f2 - 0.5 * f;
-    float2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
-    float2 w2 = -1.5 * f3 + 2.0 * f2 + 0.5 * f;
-    float2 w3 = 0.5 * f3 - 0.5 * f2;
+    // Mitchell-Netravali (B = C = 1/3): bem menos "halo"/ringing nas bordas de alto contraste (texto, HUD) que o Catmull-Rom (B = 0, C = 1/2), um pouco mais macio.
+    float2 e = 1.0 + f;
+    float2 w0 = (-7.0 / 18.0) * e * e * e + 2.0 * e * e - (10.0 / 3.0) * e + 16.0 / 9.0;
+    float2 w1 = (7.0 / 6.0) * f * f * f - 2.0 * f * f + 8.0 / 9.0;
+    float2 g = 1.0 - f;
+    float2 w2 = (7.0 / 6.0) * g * g * g - 2.0 * g * g + 8.0 / 9.0;
+    float2 h = 2.0 - f;
+    float2 w3 = (-7.0 / 18.0) * h * h * h + 2.0 * h * h - (10.0 / 3.0) * h + 16.0 / 9.0;
     float2 w12 = w1 + w2;
     float2 t0 = (c - 1.0) / texSize, t12 = (c + w2 / w12) / texSize, t3 = (c + 2.0) / texSize;
     float3 r = 0;
@@ -480,7 +484,14 @@ void wdc_present_frame(const uint8_t* rgba, unsigned w, unsigned h, int64_t t_vi
             if (off - g_base_us > 0.75 * kViPeriodUs) { if (++g_base_above >= 30) { g_base_us = off; g_base_above = 0; } }
             else g_base_above = 0;
         }
-        g_queue.push_back(Frame{std::move(buf), w, h, t_vi_us, (int64_t)(g_base_us + (double)k * kViPeriodUs) + g_latency_us.load(), k});
+        // Folga ADAPTATIVA: acompanha o atraso real de entrega do RDP (pico com decaimento lento): em 4x a GPU entrega os quadros mais tarde e uma folga fixa vira uma
+        // sequencia irregular de 1 e 2 vblanks (travadinhas); com a folga acima do atraso tipico + margem, o ritmo fica uniforme. Piso = g_latency_us, teto = 70 ms.
+        {
+            const double lag_us = (double)(now_us() - t_vi_us);
+            g_lag_peak = lag_us > g_lag_peak ? lag_us : g_lag_peak - (g_lag_peak - lag_us) * 0.01;
+        }
+        const int64_t lat = std::min<int64_t>(70000, std::max<int64_t>(g_latency_us.load(), (int64_t)g_lag_peak + 5000));
+        g_queue.push_back(Frame{std::move(buf), w, h, t_vi_us, (int64_t)(g_base_us + (double)k * kViPeriodUs) + lat, k});
         if (g_queue.size() > kMaxQueued) { g_queue.pop_front(); g_dropped++; }   // janela minimizada ou apresentador parado
     }
     {

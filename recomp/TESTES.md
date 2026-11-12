@@ -178,3 +178,13 @@ Em **corrida ao vivo** (simulação rodando); **nos menus, na pausa e nas telas 
 6. **Áudio (Enhanced)**: faça uma corrida com o motor no talo e colisões; o som deve estar limpo (o atraso de leitura que testei foi desfeito porque fazia o som picotar). Se ainda houver estalos/"explosões", anote a pista, o carro e o que acontecia (colisão, motor no talo) e me diga.
 
 **P2**: latência do controle em Enhanced (+1 quadro pelo filtro de piscadas; desliga com `WDC_NO_DEGLITCH=1`); saves de Legacy × Enhanced continuam separados.
+
+## 12. Leo Build 0.1.2 (canary) — o que testar nesta rodada (2026-11-12)
+
+**P1**
+1. **Controle Bluetooth/PlayStation/8BitDo** (o que não aparecia como Xbox): pareie no Windows, abra o jogo e passe pelos menus e por uma corrida. Direcional, analógico, A/B, Start, gatilhos e ombros devem responder. Se algum botão ficar trocado: setup → PERSONALIZAR… → "MAPEAR OUTRO CONTROLE…" (ou M) e siga o assistente; confira que o mapa vale na próxima abertura. Se nada responder: rode `WorldDriverChampionship.exe --joytest 15` num terminal, mexa nos botões e me mande a saída. **DualSense/DualShock não foi testado em hardware** (só o 8BitDo).
+2. **Controle Xbox continua igual** e **não duplica** (um controle XInput não pode aparecer duas vezes).
+3. **Texturas nítidas (Enhanced)**: abra a abertura e uma corrida em Enhanced: as paredes e a pista não devem mais ter o "borrão de movimento" (riscos). Compare com setup → IMAGEM… → TEXTURAS → ORIGINAL N64. Anote se alguma textura ficar estranha com a amostragem por ponto (bordas translúcidas, grades, faixas, sombras, fumaça, letreiros).
+4. **Legacy não mudou**: a abertura em Legacy continua com a imagem original (macia).
+
+**P2**: controle desconectado/reconectado durante a corrida volta a responder; vários controles ao mesmo tempo (jogador 2).

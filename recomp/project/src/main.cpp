@@ -31,6 +31,7 @@
 #include <io.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <timeapi.h>
 #endif
 #include <fstream>
 
@@ -43,6 +44,8 @@
 #include "wdc_config.h"
 #include "wdc_setup.h"
 #include "wdc_rom.h"
+#include "wdc_saves.h"
+#include "wdc_joy.h"
 #include "wdc_version.h"
 #include "wdc_input.h"
 #include "wdc_window.h"
@@ -537,6 +540,20 @@ static void register_wdc_overlays() {
     recomp::overlays::register_overlays(sections, overlays);
 }
 
+// Ajustes do processo para jogar sem travadas causadas pelo Windows: timer de 1 ms (o padrao de 15,6 ms atrasa dorminhocos e o ritmo de quadros) e sem a "economia de
+// energia" (EcoQoS) nem a regra que ignora o timer em segundo plano/minimizado (Windows 10/11): nelas o jogo cai para poucos quadros por segundo e o audio corta.
+static void wdc_process_tuning() {
+    timeBeginPeriod(1);
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+    PROCESS_POWER_THROTTLING_STATE st{};
+    st.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    st.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    st.StateMask = 0;   // 0 = desligar a limitacao (o controle e nosso, nao do sistema)
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &st, sizeof(st));
+}
+
 // Pasta do executavel (GetModuleFileName: argv[0] pode ser so o nome quando iniciado pelo PATH).
 static fs::path wdc_exe_dir() {
     wchar_t buf[MAX_PATH * 2] = {};
@@ -626,10 +643,16 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     for (int i = 1; i < argc; i++)
         if (!std::strcmp(argv[i], "--version")) { std::printf("%s\n", WDC_BUILD_LABEL); return 0; }
+    for (int i = 1; i < argc; i++)
+        if (!std::strcmp(argv[i], "--joytest")) {   // diagnostico de controles que nao sao XInput (PlayStation, Switch Pro, 8BitDo...)
+            wdc_joy_test(i + 1 < argc && std::isdigit((unsigned char)argv[i + 1][0]) ? std::atoi(argv[i + 1]) : 15);
+            return 0;
+        }
     fs::path rom_path;
     bool rom_given = false;
     const fs::path exe_dir = wdc_exe_dir();
     fs::path config_dir = wdc_pick_config_dir(exe_dir);
+    bool config_overridden = false;   // --config <pasta> (testes): tudo, inclusive os saves, fica nessa pasta
     int seconds = 30;
     bool seconds_given = false;
     std::string shot_path, wav_path, pak_path;
@@ -641,7 +664,7 @@ int main(int argc, char** argv) {
     int shot_extra = 0;
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--rom") && i + 1 < argc) { rom_path = argv[++i]; rom_given = true; }
-        else if (!std::strcmp(argv[i], "--config") && i + 1 < argc) config_dir = argv[++i];
+        else if (!std::strcmp(argv[i], "--config") && i + 1 < argc) { config_dir = argv[++i]; config_overridden = true; }
         else if (!std::strcmp(argv[i], "--seconds") && i + 1 < argc) { seconds = std::atoi(argv[++i]); seconds_given = true; }
         else if (!std::strcmp(argv[i], "--pak") && i + 1 < argc) pak_path = argv[++i];          // Controller Pak virtual na porta 0 (imagem de 32 KB; criada se nao existir)
         else if (!std::strcmp(argv[i], "--no-pak")) no_pak = true;                              // --play liga o pak por padrao; isto desliga
@@ -712,7 +735,17 @@ int main(int argc, char** argv) {
     }
     if (!shot_path.empty()) { wdc_rdp_vk_request_shot(shot_path.c_str(), shot_at); wdc_rdp_vk_shot_sequence(shot_extra, shot_interval); }
     // Cada modo tem o seu Controller Pak: recordes e replays (re-simulacoes de amostras a 30 Hz) nao sao portaveis entre Legacy e Enhanced.
-    if (g_play && pak_path.empty() && !no_pak) pak_path = (config_dir / (wdc_cfg().enhanced ? "wdc_pak0_enhanced.mpk" : "wdc_pak0.mpk")).string();
+    if (g_play && pak_path.empty() && !no_pak) {
+        // Saves numa pasta FIXA (%LOCALAPPDATA%/WorldDriverChampionship/saves), valida para qualquer build ou pasta do executavel; o save antigo ao lado do exe e COPIADO (nunca
+        // apagado) na primeira vez, e cada abertura guarda um backup datado (wdc_saves.h). Com --config (testes) os saves ficam na pasta de config, como antes.
+        const char* pname = wdc_cfg().enhanced ? "wdc_pak0_enhanced.mpk" : "wdc_pak0.mpk";
+        fs::path sd = config_overridden ? config_dir : wdc_saves_dir();
+        if (sd.empty()) sd = config_dir;
+        if (!config_overridden && sd != config_dir) wdc_saves_migrate(config_dir / pname, sd / pname);
+        wdc_saves_backup(sd / pname);
+        pak_path = (sd / pname).string();
+        std::printf("[saves] Controller Pak: %s\n", pak_path.c_str());
+    }
     if (!pak_path.empty() && !no_pak) wdc_pak_init(pak_path.c_str());
     recomp::register_config_path(config_dir);
     register_wdc_overlays();
@@ -735,6 +768,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (g_play) {
+        wdc_process_tuning();
         const std::string win_title = std::string("World Driver Championship - " WDC_BUILD_NAME " - ") + wdc_cfg_mode_name();
         if (!wdc_window_create(win_title.c_str(), 960, 720)) { std::printf("[main] nao consegui criar a janela\n"); return 1; }
         wdc_input_init();

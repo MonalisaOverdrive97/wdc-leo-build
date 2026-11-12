@@ -69,6 +69,7 @@ mode = "legacy"
 # So valem com mode = "enhanced" (no Legacy sao ignoradas).
 fps60 = true            # corrida a 60 Hz (demo da abertura e replays continuam a 30 Hz, como foram gravados)
 internal_scale = "auto" # resolucao interna do RDP: "auto" (4x em placa de video dedicada, 2x em integrada), 1, 2, 4 ou 8
+sharp_textures = true   # texturas nitidas: troca o filtro de 3 pontos do N64 por amostragem por ponto (tira o borrao/riscos no cenario em movimento; false = visual original)
 
 [display]
 # Valem nos dois modos: so mudam como a imagem chega a tela, nao a emulacao.
@@ -125,6 +126,7 @@ void wdc_cfg_load(const std::filesystem::path& config_dir) {
     }
     // padroes do modo; so o Enhanced aceita as melhorias
     const bool want_fps = get("enhanced.fps60") ? parse_bool(*get("enhanced.fps60"), true) : true;
+    const bool want_sharp = get("enhanced.sharp_textures") ? parse_bool(*get("enhanced.sharp_textures"), true) : true;
     int want_scale = 2;
     bool want_auto = true;   // padrao: automatico
     if (const auto* s = get("enhanced.internal_scale")) {
@@ -144,13 +146,16 @@ void wdc_cfg_load(const std::filesystem::path& config_dir) {
         }
     }
     c.scale_choice = want_auto ? 0 : want_scale;
+    c.sharp_textures_choice = want_sharp;
     c.filter_explicit = get("display.filter") != nullptr;
     if (c.enhanced) {
         c.fps60 = want_fps;
+        c.sharp_textures = want_sharp;
         c.internal_scale = want_scale;   // se auto, o renderizador resolve (wdc_cfg_resolve_auto_scale) depois de escolher a GPU
         c.scale_auto = want_auto;
     } else {
         c.fps60 = false;
+        c.sharp_textures = false;
         c.internal_scale = 1;
         if (g_overrides.count("enhanced.fps60") || g_overrides.count("enhanced.internal_scale"))
             std::printf("[cfg] AVISO: --fps60/--scale ignorados no modo Legacy (use --mode enhanced)\n");
@@ -179,6 +184,8 @@ void wdc_cfg_load(const std::filesystem::path& config_dir) {
             const std::string key = std::string(s == 0 ? "controls.classic." : "controls.modern.") + kWdcActionKeys[a];
             if (const auto* v = get(key.c_str())) c.bind[s][a] = *v;
         }
+    for (const auto& [k, v] : kv)   // [gamepad] dev_<vid>_<pid> = mapa de botoes aprendido no setup
+        if (k.rfind("gamepad.dev_", 0) == 0) c.joymap[k.substr(8)] = v;
     g_cfg = c;
     const char* fn = c.filter == WdcFilter::Nearest ? "nearest" : c.filter == WdcFilter::Bilinear ? "bilinear" : c.filter == WdcFilter::Sharp ? "sharp" : "bicubic";
     char sc[16];

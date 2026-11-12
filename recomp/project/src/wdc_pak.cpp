@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -107,6 +108,14 @@ bool wdc_pak_init(const char* path) {
     }
     g_pak.plugged = true;
     if (!have) {
+        {   // regra: nunca perder um save. Arquivo existente com tamanho errado/ilegivel e guardado ao lado (.invalido) antes de criar o pak de fabrica.
+            std::error_code ec;
+            if (std::filesystem::exists(g_path, ec)) {
+                const std::filesystem::path keep = std::filesystem::path(g_path).concat(".invalido");
+                if (std::filesystem::copy_file(g_path, keep, std::filesystem::copy_options::skip_existing, ec) && !ec)
+                    std::printf("[pak] AVISO: %s nao tem o tamanho de um Controller Pak; copia guardada em %s\n", g_path.c_str(), keep.string().c_str());
+            }
+        }
         wdcpfs::FormatPak(g_pak);
         g_enabled = true;
         save_locked();
