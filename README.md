@@ -2,7 +2,7 @@
 
 Recompilação estática **não oficial** do *World Driver Championship* (Nintendo 64, Boss Game Studios / Midway, 1999) para Windows, feita com
 [N64Recomp](https://github.com/N64Recomp/N64Recomp) / N64ModernRuntime e o renderizador [parallel-RDP](https://github.com/Themaister/parallel-rdp) (Vulkan).
-Projeto de fã, sem ligação com a Boss Game Studios, a Midway ou a Nintendo.
+Projeto de fã, sem ligação com a Boss Game Studios, a Midway ou a Nintendo. **Esse projeto foi feito com auxílio de IA.**
 
 > **Este repositório não contém a ROM nem o código do jogo original** (nem o C/ucode recompilados, nem disassemblies). Para jogar é preciso ter o seu próprio arquivo da ROM
 > (versão dos EUA, "USA"), que o programa pede na primeira vez e guarda uma cópia.
