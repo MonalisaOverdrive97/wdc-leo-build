@@ -175,6 +175,6 @@ Em **corrida ao vivo** (simulação rodando); **nos menus, na pausa e nas telas 
 3. **Setup → PERSONALIZAR…**: no Clássico e no Moderno, mude acelerar/frear/marchas/visão com o controle (clique na caixa do meio e aperte o botão) e jogue uma volta; "Padrão" volta ao original. Confira que a duplicata é removida (ao dar a mesma tecla a duas ações, a primeira fica "SEM BOTÃO").
 4. **Atalho na área de trabalho** (botão no topo do setup): cria e abre o jogo.
 5. **Piscadas (Enhanced)**: jogue 10–15 min em Enhanced (menus, seleção de carro, contagem e corrida): os quadros com céu/fundo verde "chiando" não devem mais aparecer. Se aparecer algum, anote onde (tela, carro, pista) e me diga.
-6. **Áudio (Enhanced)**: faça uma corrida com o motor no talo e colisões; os estalos/"explosões" não devem mais aparecer. Se ainda ocorrer, rode com `WDC_AUDIO_LAG_MS=100` (variável de ambiente) para ver se melhora e me avise o resultado.
+6. **Áudio (Enhanced)**: faça uma corrida com o motor no talo e colisões; o som deve estar limpo (o atraso de leitura que testei foi desfeito porque fazia o som picotar). Se ainda houver estalos/"explosões", anote a pista, o carro e o que acontecia (colisão, motor no talo) e me diga.
 
-**P2**: sincronia do som (40 ms atrás da imagem: se incomodar, `WDC_AUDIO_LAG_MS=20`); latência do controle em Enhanced (+1 quadro pelo filtro de piscadas; desliga com `WDC_NO_DEGLITCH=1`); saves de Legacy × Enhanced continuam separados.
+**P2**: latência do controle em Enhanced (+1 quadro pelo filtro de piscadas; desliga com `WDC_NO_DEGLITCH=1`); saves de Legacy × Enhanced continuam separados.

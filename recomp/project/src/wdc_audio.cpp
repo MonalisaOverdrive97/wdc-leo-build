@@ -13,7 +13,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -34,15 +33,8 @@ struct Desc { const uint8_t* p = nullptr; uint32_t frames = 0; };
 Desc g_cur, g_pend;
 bool g_cur_valid = false, g_pend_valid = false;
 uint32_t g_pos = 0;                          // quadro atual dentro de g_cur
-// ATRASO DE LEITURA. O jogo escreve o anel de 16 KB logo a frente da posicao de reproducao (a tarefa de audio do RSP roda na mesma CPU que a de video) e a AI emulada le a
-// RDRAM no instante em que o quadro toca. Se a tarefa de audio atrasa (CPU ocupada: 60 fps no modo Enhanced, GPU, antivirus...), a AI toca dados VELHOS do anel (da volta
-// anterior): estalos de poucas amostras e, com o motor no talo, "estouros". Para dar folga, a reproducao le os quadros g_lag_frames DEPOIS do instante nominal, sem mudar o
-// que o jogo ve (posicao, status e comprimento do DMA seguem o relogio nominal). A folga maxima segura e o anel menos a antecedencia com que o jogo escreve (~120 ms).
-struct Seg { const uint8_t* p; uint32_t frames; uint64_t start; };
-std::deque<Seg> g_segs;                      // DMAs ja iniciados (mais recente no fim), com a posicao absoluta (em quadros) em que comecam
-uint64_t g_stream = 0;                       // quadros consumidos no total (posicao nominal da AI)
-uint32_t g_lag_frames = 0;                   // atraso de leitura em quadros (na taxa do jogo)
-double g_lag_ms = 0.0;                       // pedido (ms); convertido em quadros quando a taxa e conhecida
+// (Tentativa descartada em 2026-11-12: ler a RDRAM com atraso (60/40 ms) para dar folga a tarefa de audio. Na maquina do usuario o som passou a picotar o tempo todo:
+// o anel que o jogo reescreve nao garante que o dado de ha 40 ms ainda esteja la. Voltou a leitura no instante nominal.)
 double g_frac = 0.0;                         // posicao fracionaria entre g_pos e g_pos+1 (resample para o dispositivo)
 std::atomic<uint32_t> g_rate{32000};
 
@@ -73,37 +65,20 @@ inline void frame_at(const Desc& d, uint32_t k, float& L, float& R, int& li, int
     R = (float)ri;
 }
 
-// Quadro na posicao absoluta r do fluxo (com o atraso de leitura); silencio antes do primeiro DMA. Chamado com g_mu travado.
-void stream_frame(int64_t r, float& L, float& R, int& li, int& ri) {
-    L = R = 0.f; li = ri = 0;
-    if (r < 0) return;
-    for (auto it = g_segs.rbegin(); it != g_segs.rend(); ++it)
-        if ((uint64_t)r >= it->start) {
-            if ((uint64_t)r < it->start + it->frames) frame_at(Desc{it->p, it->frames}, (uint32_t)((uint64_t)r - it->start), L, R, li, ri);
-            return;
-        }
-}
-void trim_segs() {
-    const uint64_t keep_from = g_stream > g_lag_frames + 2 ? g_stream - g_lag_frames - 2 : 0;
-    while (g_segs.size() > 2 && g_segs.front().start + g_segs.front().frames < keep_from) g_segs.pop_front();
-}
-
 // Consome um quadro do DMA em curso (WAV e estatisticas); ao fim do DMA o pendente assume. Chamado com g_mu travado.
 void consume_one_locked() {
     float L, R;
     int li, ri;
-    stream_frame((int64_t)g_stream - (int64_t)g_lag_frames, L, R, li, ri);
+    frame_at(g_cur, g_pos, L, R, li, ri);
     g_peak = std::max({g_peak, std::abs(li), std::abs(ri)});
     g_sumsq += (double)li * li + (double)ri * ri;
     if (li || ri) g_nonzero++;
     g_frames_played++;
     if (!g_wav_path.empty()) { g_wav.push_back((int16_t)li); g_wav.push_back((int16_t)ri); }
-    g_stream++;
     if (++g_pos >= g_cur.frames) {
         g_pos = 0;
-        if (g_pend_valid) { g_cur = g_pend; g_pend_valid = false; g_segs.push_back({g_cur.p, g_cur.frames, g_stream}); }
+        if (g_pend_valid) { g_cur = g_pend; g_pend_valid = false; }
         else g_cur_valid = false;   // AI ociosa
-        trim_segs();
     }
 }
 
@@ -139,9 +114,10 @@ void render(void* out, uint32_t n, uint32_t dev_rate, uint32_t ch, bool is_float
         if (g_cur_valid) {
             float a0, b0, a1, b1;
             int li, ri;
-            const int64_t rd = (int64_t)g_stream - (int64_t)g_lag_frames;
-            stream_frame(rd, a0, b0, li, ri);
-            stream_frame(rd + 1, a1, b1, li, ri);
+            frame_at(g_cur, g_pos, a0, b0, li, ri);
+            if (g_pos + 1 < g_cur.frames) frame_at(g_cur, g_pos + 1, a1, b1, li, ri);
+            else if (g_pend_valid) frame_at(g_pend, 0, a1, b1, li, ri);
+            else { a1 = a0; b1 = b0; }
             const float a = (float)g_frac;
             L = ((1.f - a) * a0 + a * a1) / 32768.f;
             R = ((1.f - a) * b0 + a * b1) / 32768.f;
@@ -222,8 +198,6 @@ done:
 
 void wdc_audio_init(const char* wav_path, bool real_output) {
     if (wav_path) g_wav_path = wav_path;
-    g_lag_ms = 40.0;   // padrao: 40 ms (WDC_AUDIO_LAG_MS=0 desliga; maximo 110)
-    if (const char* e = std::getenv("WDC_AUDIO_LAG_MS")) g_lag_ms = std::max(0.0, std::min(110.0, std::atof(e)));
     g_real = real_output;
     if (real_output) {
         g_dev_thread = std::thread(device_thread);
@@ -236,8 +210,7 @@ void wdc_audio_set_frequency(uint32_t hz) {
     std::lock_guard<std::mutex> l(g_mu);
     if (!g_real) null_advance_locked();
     g_rate = hz ? hz : 32000;
-    g_lag_frames = (uint32_t)(g_lag_ms * 0.001 * (double)g_rate.load());
-    std::printf("[audio %7.2fs] frequencia = %u Hz (atraso de leitura %.0f ms = %u quadros)\n", wdc_now_s(), (unsigned)g_rate.load(), g_lag_ms, g_lag_frames);
+    std::printf("[audio %7.2fs] frequencia = %u Hz\n", wdc_now_s(), (unsigned)g_rate.load());
 }
 
 void wdc_audio_queue_samples(int16_t*, size_t) {}
@@ -257,7 +230,7 @@ extern "C" void wdc_hook_osAiSetNextBuffer(uint8_t* rdram, recomp_context* ctx) 
     d.frames = bytes / 4;
     if (!d.frames) { ctx->r2 = 0; return; }
     g_frames_in += d.frames;
-    if (!g_cur_valid) { g_cur = d; g_cur_valid = true; g_pos = 0; g_frac = 0.0; g_null_last = Clock::now(); g_null_acc = 0.0; g_segs.push_back({d.p, d.frames, g_stream}); trim_segs(); }
+    if (!g_cur_valid) { g_cur = d; g_cur_valid = true; g_pos = 0; g_frac = 0.0; g_null_last = Clock::now(); g_null_acc = 0.0; }
     else { g_pend = d; g_pend_valid = true; }
     ctx->r2 = 0;
 }

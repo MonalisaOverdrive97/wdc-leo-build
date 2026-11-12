@@ -8,7 +8,7 @@ Projeto de fã, sem ligação com a Boss Game Studios, a Midway ou a Nintendo. *
 > (versão dos EUA, "USA"), que o programa pede na primeira vez e guarda uma cópia.
 
 ## Baixar e jogar (Windows 10/11, 64 bits)
-1. Na aba **Releases**, baixe `WorldDriverChampionship-LeoBuild-0.1.0-canary-win64.zip`.
+1. Na aba **Releases**, baixe `WorldDriverChampionship-LeoBuild-0.1.1-canary-win64.zip`.
 2. Extraia a pasta, abra `WorldDriverChampionship.exe` e aperte **JOGAR**. Na primeira vez escolha o arquivo da ROM.
 3. Leia o `LEIA-ME.txt` do pacote (controles, modos, saves, problemas comuns).
 

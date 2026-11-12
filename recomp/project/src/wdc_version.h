@@ -3,7 +3,7 @@
 
 #define WDC_BUILD_NAME "Leo Build"
 #define WDC_BUILD_CHANNEL "canary"
-#define WDC_BUILD_VERSION "0.1.0"
+#define WDC_BUILD_VERSION "0.1.1"
 #define WDC_BUILD_LABEL WDC_BUILD_NAME " " WDC_BUILD_VERSION " (" WDC_BUILD_CHANNEL ")"
 
 // Versoes largas (L"...") para a interface em GDI+.

@@ -42,9 +42,11 @@ def main():
         import os, stat
         os.chmod(path, stat.S_IWRITE)
         func(path)
-    if OUT.exists():
-        shutil.rmtree(OUT, onexc=_force)
-    OUT.mkdir(parents=True)
+    OUT.mkdir(parents=True, exist_ok=True)
+    for e in OUT.iterdir():   # limpa tudo MENOS o .git (o historico e o remoto ficam)
+        if e.name == ".git":
+            continue
+        shutil.rmtree(e, onexc=_force) if e.is_dir() else e.unlink()
     n = 0
     def copy(src: Path):
         nonlocal n
