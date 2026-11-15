@@ -24,6 +24,8 @@ void wdc_rdp_vk_vi(const uint32_t regs[14]);
 void wdc_rdp_vk_note_swap(uint32_t fb_addr);
 // fn recebe cada quadro do scanout (RGBA8) e o instante (microssegundos, relogio de wdc_present_now_us) do retrace de VI que o gerou.
 void wdc_rdp_vk_set_present(void (*fn)(const uint8_t* rgba, unsigned w, unsigned h, int64_t t_vi_us));
+// fn e chamada no lugar de `present` quando o scanout daria exatamente a imagem anterior (nada a copiar); recebe so o instante do retrace de VI.
+void wdc_rdp_vk_set_present_repeat(void (*fn)(int64_t t_vi_us));
 
 // Pede uma captura PNG do scanout (VI) no primeiro quadro depois de `after_seconds` desde o inicio do processo.
 void wdc_rdp_vk_request_shot(const char* path, double after_seconds);
@@ -41,6 +43,7 @@ static inline bool wdc_rdp_vk_active() { return false; }
 static inline void wdc_rdp_vk_commands(const uint32_t*, size_t) {}
 static inline void wdc_rdp_vk_vi(const uint32_t*) {}
 static inline void wdc_rdp_vk_set_present(void (*)(const uint8_t*, unsigned, unsigned, int64_t)) {}
+static inline void wdc_rdp_vk_set_present_repeat(void (*)(int64_t)) {}
 static inline void wdc_rdp_vk_note_swap(uint32_t) {}
 static inline void wdc_rdp_vk_request_shot(const char*, double) {}
 static inline bool wdc_rdp_vk_shot_done() { return false; }

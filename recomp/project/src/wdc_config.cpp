@@ -77,6 +77,7 @@ vsync = "on"            # "on" = sincroniza com o monitor (sem rasgos); "off" = 
 filter = "sharp"        # escalonamento: "nearest", "bilinear", "sharp" (bilinear nitido) ou "bicubic" (o mais suave)
 aspect = "4:3"          # "4:3" = proporcao original com barras pretas; "stretch" = preenche a janela (deforma a imagem)
 fullscreen = false      # abrir em tela cheia (F11 alterna durante o jogo)
+performance = "auto"    # "auto" = se o PC nao acompanha o jogo, desenha menos quadros para o jogo nao desacelerar (num PC rapido nada muda); "off" = sempre desenha todos os quadros
 backend = "d3d11"       # "d3d11" (GPU, v-sync) ou "gdi" (antigo, sem v-sync)
 
 [controls]
@@ -178,6 +179,7 @@ void wdc_cfg_load(const std::filesystem::path& config_dir) {
         c.aspect = (s == "stretch" || s == "fill" || s == "16:9") ? WdcAspect::Stretch : WdcAspect::Original;
     }
     if (const auto* v = get("display.fullscreen")) c.fullscreen = parse_bool(*v, false);
+    if (const auto* v = get("display.performance")) { const std::string s = lower(*v); c.perf_auto = !(s == "off" || s == "quality" || s == "false" || s == "0" || s == "no"); }
     if (const auto* v = get("controls.scheme")) c.controls = lower(*v) == "modern" ? WdcControls::Modern : WdcControls::Classic;
     for (int s = 0; s < 2; s++)
         for (int a = 0; a < kWdcActions; a++) {
@@ -190,9 +192,9 @@ void wdc_cfg_load(const std::filesystem::path& config_dir) {
     const char* fn = c.filter == WdcFilter::Nearest ? "nearest" : c.filter == WdcFilter::Bilinear ? "bilinear" : c.filter == WdcFilter::Sharp ? "sharp" : "bicubic";
     char sc[16];
     if (c.scale_auto) std::snprintf(sc, sizeof sc, "auto"); else std::snprintf(sc, sizeof sc, "%dx", c.internal_scale);
-    std::printf("[cfg] modo=%s fps60=%s escala_interna=%s vsync=%s filtro=%s tela=%s%s apresentador=%s controles=%s (%s)\n", wdc_cfg_mode_name(), c.fps60 ? "on" : "off", sc,
+    std::printf("[cfg] modo=%s fps60=%s escala_interna=%s vsync=%s filtro=%s tela=%s%s apresentador=%s controles=%s desempenho=%s (%s)\n", wdc_cfg_mode_name(), c.fps60 ? "on" : "off", sc,
                 c.vsync == WdcVsync::On ? "on" : "off", fn, c.aspect == WdcAspect::Stretch ? "esticada" : "4:3", c.fullscreen ? " (tela cheia)" : "",
-                c.backend == WdcBackend::D3D11 ? "d3d11" : "gdi", c.controls == WdcControls::Modern ? "modern" : "classic", path.string().c_str());
+                c.backend == WdcBackend::D3D11 ? "d3d11" : "gdi", c.controls == WdcControls::Modern ? "modern" : "classic", c.perf_auto ? "auto" : "off", path.string().c_str());
 }
 
 const char* const kWdcActionKeys[kWdcActions] = {"accelerate", "brake", "soft_brake", "shift_up", "shift_down", "camera"};

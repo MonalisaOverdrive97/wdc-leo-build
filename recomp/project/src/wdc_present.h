@@ -10,6 +10,8 @@ bool wdc_present_init(void* hwnd, const WdcConfig& cfg);   // false = nao conseg
 bool wdc_present_active();                                  // true entre um init bem-sucedido e o shutdown/uma falha de dispositivo
 int64_t wdc_present_now_us();   // relogio monotonico (microssegundos) usado nos instantes dos quadros
 void wdc_present_frame(const uint8_t* rgba, unsigned w, unsigned h, int64_t t_vi_us);   // quadro RGBA8 (campo de 640x240 e esticado para 4:3) e o instante do retrace de VI; seguro de qualquer thread
+// Reapresenta o ultimo quadro publicado (mesma imagem): publica na linha do tempo sem copiar os pixels e sem reenviar a textura a GPU. Usado quando o scanout seria identico.
+void wdc_present_repeat(int64_t t_vi_us);
 void wdc_present_set_extra_latency_us(int64_t extra_us);   // folga a mais no buffer de jitter (o RDP segura 1 quadro para filtrar piscadas: ~16700 us)
 void wdc_present_shutdown();
 void wdc_present_print_stats();

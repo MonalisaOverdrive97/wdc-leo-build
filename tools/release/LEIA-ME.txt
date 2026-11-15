@@ -1,4 +1,4 @@
-WORLD DRIVER CHAMPIONSHIP  -  LEO BUILD 0.1.4 (canary)
+WORLD DRIVER CHAMPIONSHIP  -  LEO BUILD 0.1.5 (canary)
 Recompilação para PC (não oficial)
 =====================================================================
 
@@ -113,6 +113,33 @@ Para começar do zero, apague os arquivos .mpk da pasta de saves.
 Para trocar a ROM, apague wdc.z64.
 
 
+COMO LEVAR OS SAVES DA 0.1.4 PARA A 0.1.5
+-----------------------------------------
+No MESMO PC onde você jogou a 0.1.4 não precisa fazer nada: a 0.1.4 e a 0.1.5
+usam a mesma pasta de saves (acima). Extraia a 0.1.5 em qualquer lugar, abra e
+jogue: seus recordes e carros liberados já estão lá. Pode manter a pasta da
+0.1.4 ou apagá-la depois; os saves NÃO ficam dentro dela.
+
+Para levar os saves para OUTRO PC (ou se a 0.1.5 abrir com tudo zerado):
+ 1. No PC antigo, feche o jogo. Aperte Windows+R, cole
+        %LOCALAPPDATA%\WorldDriverChampionship\saves
+    e dê Enter. Copie os arquivos  wdc_pak0.mpk  (Legacy) e/ou
+    wdc_pak0_enhanced.mpk  (Enhanced) para um pen drive. Se quiser, leve
+    também a pasta  backups  (cópias datadas dos saves).
+ 2. No PC novo, abra a 0.1.5 UMA vez e feche (isso cria a pasta de saves).
+ 3. Aperte Windows+R, cole o mesmo endereço, dê Enter e cole os arquivos .mpk
+    lá dentro. Se o Windows perguntar se quer substituir, só aceite se o save
+    que está lá for novo (sem progresso). Se tiver progresso que você quer
+    guardar, antes renomeie o arquivo atual (ex.: wdc_pak0_novo.mpk).
+ 4. Abra a 0.1.5. O Legacy e o Enhanced têm cada um o seu arquivo: confira o
+    modo escolhido na tela de configuração.
+Se você usou versões muito antigas (0.1.0 ou 0.1.1), o save ficava na pasta
+wdc_config, ao lado do .exe daquela versão: a 0.1.5 o COPIA sozinha na primeira
+vez (sem apagar o original); se isso não acontecer, copie o arquivo
+wdc_config\wdc_pak0.mpk daquela pasta para a pasta de saves, como no passo 3.
+Nunca apague a pasta de saves nem a  backups: é onde está o seu progresso.
+
+
 PROBLEMAS COMUNS
 ----------------
 - Mensagem sobre Vulkan ou tela preta: atualize o driver da placa de vídeo
@@ -121,6 +148,14 @@ PROBLEMAS COMUNS
   (USA) do World Driver Championship.
 - A imagem está pesada ou travando: na tela de configuração escolha IMAGEM...
   e diminua a resolução interna (2x ou 1x), ou use o modo Legacy.
+  No modo Legacy o jogo cuida disso sozinho: se o PC não acompanha, ele desenha
+  menos quadros (a imagem fica menos fluida, mas o jogo não desacelera). Num PC
+  que acompanha, nada muda. Para desligar, no wdc_config.toml (seção [display])
+  coloque  performance = "off".
+- Engasgos só nos primeiros minutos de uso, ou só na primeira vez em um PC novo:
+  é o programa da placa de vídeo preparando os shaders do jogo; ele guarda o
+  resultado e as próximas vezes são mais suaves. Feche o jogo pelo X da janela
+  (assim o resultado é guardado) e abra de novo.
 - O antivírus reclamou: o programa é novo e não tem assinatura digital; isso é
   esperado em programas de hobby. Se confiar em quem lhe enviou, libere-o.
 - Se algo travar ou soar estranho, feche a janela e abra de novo. Se o problema

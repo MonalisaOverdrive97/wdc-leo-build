@@ -491,6 +491,7 @@ static int g_cov_snap_at = -1;          // --covsnap: segundo em que gravar cov_
 static void wdc_fp_enable_flush() { _mm_setcsr(_mm_getcsr() | 0x8040); }
 static std::string wdc_game_thread_name(const OSThread* t) {
     wdc_fp_enable_flush();   // chamado pelo ultramodern na propria thread nova, antes de ela executar codigo do jogo
+    if (!std::getenv("WDC_NO_PRIO")) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);   // threads do jogo: nao ficam atras de programas em segundo plano
     return "wdc thread " + std::to_string(t->id);
 }
 
@@ -685,6 +686,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--vsync") && i + 1 < argc) wdc_cfg_set_override("display.vsync", argv[++i]);          // on | off
         else if (!std::strcmp(argv[i], "--filter") && i + 1 < argc) wdc_cfg_set_override("display.filter", argv[++i]);        // nearest | bilinear | sharp
         else if (!std::strcmp(argv[i], "--present") && i + 1 < argc) wdc_cfg_set_override("display.backend", argv[++i]);      // d3d11 | gdi
+        else if (!std::strcmp(argv[i], "--performance") && i + 1 < argc) wdc_cfg_set_override("display.performance", argv[++i]);   // auto | off
         else if (!std::strcmp(argv[i], "--setup")) run_setup = true;                                                       // mostra o setup (modo e controles) antes de jogar
         else if (!std::strcmp(argv[i], "--setup-shot") && i + 1 < argc) { run_setup = true; setup_shot = argv[++i]; }   // depuracao: captura do setup
         else if (!std::strcmp(argv[i], "--controls") && i + 1 < argc) wdc_cfg_set_override("controls.scheme", argv[++i]);     // classic | modern
@@ -777,10 +779,12 @@ int main(int argc, char** argv) {
     }
     if (g_play) {
         wdc_process_tuning();
+        wdc_perf_tune_start();
         const std::string win_title = std::string("World Driver Championship - " WDC_BUILD_NAME " - ") + wdc_cfg_mode_name();
         if (!wdc_window_create(win_title.c_str(), 960, 720)) { std::printf("[main] nao consegui criar a janela\n"); return 1; }
         wdc_input_init();
         wdc_rdp_vk_set_present(wdc_window_present);
+        wdc_rdp_vk_set_present_repeat(wdc_window_present_repeat);
         std::printf("[input] teclado: setas=analogico WASD=direcional X=A C=B Z=Z Enter=Start Q=L E=R IJKL=C Esc=sair F11=tela cheia\n");
     }
     std::printf("[main] ROM validada e copiada para %s\n", (config_dir / "wdc.z64").string().c_str());
@@ -864,7 +868,11 @@ int main(int argc, char** argv) {
             }
             if (s % 2 == 0) {
                 const uint64_t hb_tasks = std::max<uint64_t>(g_task_count.load(), wdc_gfx_tasks());
-                std::printf("[hb %5.1fs] vi=%" PRIu64 " tarefas=%" PRIu64 " telas=%" PRIu64 "\n", now_s(), g_vi_count.load(), hb_tasks, g_frame_count.load());
+                static double hb_prev_cpu = 0.0, hb_prev_t = 0.0;
+                const double cpu_now = wdc_proc_cpu_seconds(), t_now = now_s();
+                const double cpu_pct = t_now > hb_prev_t ? 100.0 * (cpu_now - hb_prev_cpu) / (t_now - hb_prev_t) : 0.0;
+                hb_prev_cpu = cpu_now; hb_prev_t = t_now;
+                std::printf("[hb %5.1fs] vi=%" PRIu64 " tarefas=%" PRIu64 " telas=%" PRIu64 " cpu=%.0f%%\n", t_now, g_vi_count.load(), hb_tasks, g_frame_count.load(), cpu_pct);
 #ifndef WDC_TRACE_BUILD
                 static uint64_t hb_prev_tasks = 0, hb_prev_vi = 0;
                 if (s > 6 && hb_tasks - hb_prev_tasks < 20 && g_vi_count.load() - hb_prev_vi > 60) {   // retracos seguem, tarefas graficas quase pararam
@@ -883,6 +891,7 @@ int main(int argc, char** argv) {
         if (g_lle) wdc_rsp_print_stats();
         wdc_rdp_vk_print_stats();
         wdc_audio_shutdown();
+        wdc_logs_cpu_report();
         wdc_pak_flush();
         if (g_play) wdc_window_destroy();
 #ifdef WDC_TRACE_BUILD

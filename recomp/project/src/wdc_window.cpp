@@ -1,4 +1,5 @@
 // Janela do modo interativo (ver wdc_window.h).
+#include "wdc_logs.h"
 #include "wdc_window.h"
 #include "wdc_config.h"
 #include "wdc_present.h"
@@ -158,6 +159,7 @@ void dpi_awareness_init() {
 }
 
 void window_thread(std::string title, int cw, int ch, std::promise<bool> ready) {
+    wdc_set_thread_name(L"wdc-window");
     dpi_awareness_init();
     WNDCLASSW wc{};
     wc.lpfnWndProc = wnd_proc;
@@ -235,6 +237,10 @@ void wdc_window_present(const uint8_t* rgba, unsigned w, unsigned h, int64_t t_v
         g_bh = h;
     }
     if (g_hwnd && !g_present_pending.exchange(true)) PostMessageW(g_hwnd, WM_WDC_PRESENT, 0, 0);
+}
+
+void wdc_window_present_repeat(int64_t t_vi_us) {
+    if (wdc_present_active()) wdc_present_repeat(t_vi_us);   // GDI (fallback): a janela ja mostra a imagem; nada a fazer
 }
 
 bool wdc_window_foreground() { return g_hwnd && GetForegroundWindow() == g_hwnd; }

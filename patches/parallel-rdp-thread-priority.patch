@@ -1,0 +1,28 @@
+diff --git a/parallel-rdp/command_ring.cpp b/parallel-rdp/command_ring.cpp
+index 5220cbc..2fecf87 100644
+--- a/parallel-rdp/command_ring.cpp
++++ b/parallel-rdp/command_ring.cpp
+@@ -25,6 +25,11 @@
+ #include "rdp_device.hpp"
+ #include "thread_id.hpp"
+ #include <assert.h>
++#ifdef _WIN32   // WDC: prioridade da thread de comandos
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <windows.h>
++#endif
+ 
+ namespace RDP
+ {
+@@ -86,6 +91,11 @@ void CommandRing::enqueue_command(unsigned num_words, const uint32_t *words)
+ void CommandRing::thread_loop()
+ {
+ 	Util::register_thread_index(0);
++#ifdef _WIN32
++	// WDC: esta thread decodifica os comandos do RDP e os entrega a GPU; o jogo espera por ela em cada SYNC_FULL. Acima do normal para nao ser atrasada por carga em segundo plano.
++	if (!getenv("WDC_NO_PRIO"))
++		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
++#endif
+ 
+ #ifdef PARALLEL_RDP_SHADER_DIR
+ 	// Here to let the RDP play nice with full Granite.

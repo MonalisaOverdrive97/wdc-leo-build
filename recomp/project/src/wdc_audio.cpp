@@ -4,6 +4,7 @@
 // palavra lida de um quadro e (L << 16) | R. A AI le a RDRAM no momento de tocar (o jogo reescreve o anel logo atras da posicao de
 // reproducao). Saida: a thread do dispositivo (WASAPI, shared, event-driven) converte da taxa do jogo (22 kHz) para o formato de
 // mixagem do Windows com interpolacao linear. Sem dispositivo (ou --no-audio-out) o tempo real avanca a reproducao.
+#include "wdc_logs.h"
 #include "wdc_audio.h"
 
 #include <algorithm>
@@ -244,6 +245,7 @@ void render(void* out, uint32_t n, uint32_t dev_rate, uint32_t ch, bool is_float
 }
 
 void device_thread() {
+    wdc_set_thread_name(L"wdc-audio");
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IMMDeviceEnumerator* en = nullptr;
     IMMDevice* dev = nullptr;

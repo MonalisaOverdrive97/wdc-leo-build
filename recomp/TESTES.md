@@ -191,6 +191,23 @@ Em **corrida ao vivo** (simulação rodando); **nos menus, na pausa e nas telas 
 
 **P1 (pop-in)**: 5. **Hawaii A e C — texture pop-in**: jogue com TEXTURAS = NÍTIDAS e com ORIGINAL N64 e me diga se o pop-in some no segundo caso.
 
+## 14. Desempenho em PCs fracos (0.1.5)
+
+Ferramentas: `recomp/explore/arc/scripts` (`run_win.sh`: rota de corrida do Legacy em janela; `run_cold.sh`; `run_constrained.ps1`: afinidade de CPU + processos que queimam CPU). Variáveis de teste: `WDC_FAKE_FRAME_MS`/`WDC_FAKE_SCAN_MS` (GPU lenta simulada), `WDC_GOV_FORCE=<fração>`, `WDC_NO_GOV`, `WDC_NO_SCAN_REPEAT`, `WDC_SCAN_VERIFY`, `WDC_VERIFY_DIR`, `WDC_NO_PRIO`, `WDC_STOCK_PIPE`.
+
+| Teste | Resultado |
+|---|---|
+| Legacy, quadro de controle (`--task-clock --shot-at 21`) | idêntico byte a byte à 0.1.4 |
+| Janela, Legacy, 80 s, normal | 29,7 tarefas/s; governador não entra; scanouts reais ~2.290 de 4.657 (repetição 50%) |
+| Repetição: verificação pixel a pixel | 2.327 de 2.328 candidatos diferem ≤ 1 nível (dither do VI); 1 difere de verdade (causa não explicada; limitado a 1 tick) |
+| GPU fraca simulada (30 + 6 ms) | sem governador 19,7 tarefas/s; com governador 28,4 |
+| GPU intermediária simulada (12 + 3 ms) | governador não entra; 29,6 tarefas/s |
+| Enhanced em janela, com/sem governador | mesma velocidade do jogo; governador desligado no Enhanced |
+| CPU limitada (2 CPUs + 2 queimadores) | prioridades: pior engasgo da apresentação 5,8-6,9 s → 0,7-0,9 s; velocidade média sem ganho claro |
+| Legacy na Intel (`--rdp-gpu 0`) | 2.313 repetições; 1 compilação bloqueante; sem regressão |
+
+**Não verificado**: em outro PC fraco de verdade (o do pai do usuário); cache frio do driver Intel após a correção; aspecto visual do frameskip em jogo real; antivírus/overlays.
+
 ## 13. Leo Build 0.1.4 (canary) — o que testar nesta rodada (2026-11-15)
 
 **P1**

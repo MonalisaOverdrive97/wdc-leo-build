@@ -1,0 +1,41 @@
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 17d7a47..e1ebcc3 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -274,7 +274,7 @@ void dp_complete() {
+ 
+ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready) {
+     ultramodern::set_native_thread_name("SP Task Thread");
+-    ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::Normal);
++    ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::High);   // WDC
+ 
+     // Notify the caller thread that this thread is ready.
+     thread_ready->signal();
+@@ -335,7 +335,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+     using namespace std::chrono_literals;
+ 
+     ultramodern::set_native_thread_name("Gfx Thread");
+-    ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::Normal);
++    ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::High);   // WDC
+ 
+     auto old_config = ultramodern::renderer::get_graphics_config();
+ 
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 6e3ed18..c1e6270 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -1,4 +1,5 @@
+ #include <cstdio>
++#include <cstdlib>
+ #include <thread>
+ #include <cassert>
+ #include <string>
+@@ -96,7 +97,7 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {
+             throw std::runtime_error("Invalid thread priority!");
+             break;
+     }
+-    // SetThreadPriority(GetCurrentThread(), nPriority);
++    if (!std::getenv("WDC_NO_PRIO")) SetThreadPriority(GetCurrentThread(), nPriority);   // WDC: o upstream deixa comentado; a thread de VI (Critical) nao pode atrasar em PC carregado
+ }
+ #elif defined(__linux__)
+ #include <sys/prctl.h>

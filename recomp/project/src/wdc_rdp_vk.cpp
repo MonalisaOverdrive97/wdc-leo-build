@@ -5,11 +5,13 @@
 // que e o proprio RDRAM do jogo importado via VK_EXT_external_memory_host, esta coerente). Scanout: registradores de VI do runtime.
 #include "wdc_rdp_vk.h"
 #include "wdc_config.h"
+#include "wdc_logs.h"
 #include "wdc_present.h"
 #include "wdc_window.h"
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <algorithm>
@@ -104,6 +106,10 @@ double g_sync_wait_total = 0.0, g_sync_wait_max = 0.0;
 uint64_t g_gap_hist[7] = {0, 0, 0, 0, 0, 0, 0};
 uint64_t g_slow_cpu_frames = 0;
 double g_cpu_ms_max = 0.0;
+// Custo da thread do RDP (para achar o gargalo em PCs fracos): scanout (VI na GPU + leitura de volta + entrega), CPU enfileirando e espera da GPU por quadro.
+double g_vi_ms_total = 0.0, g_vi_ms_max = 0.0, g_scan_ms_total = 0.0, g_scan_ms_max = 0.0, g_enq_ms_total = 0.0;
+uint64_t g_busy_hist[7] = {0, 0, 0, 0, 0, 0, 0};   // CPU enfileirando + espera da GPU por quadro (ms): <8, <16, <24, <30, <36, <50, >=50
+uint64_t g_vi_ticks = 0, g_vi_dup_candidates = 0;
 uint32_t g_vi_latest[14] = {};
 uint8_t* g_rdram_ptr = nullptr;
 // Cache de pipelines do Vulkan em disco (%LOCALAPPDATA%/WorldDriverChampionship/cache, um arquivo por placa): as proximas execucoes nao recompilam os shaders do RDP que ja foram usados
@@ -149,6 +155,97 @@ void save_pipeline_cache() {
 inline uint32_t rdram_word(uint32_t phys) { return g_rdram_ptr ? *(const volatile uint32_t*)(g_rdram_ptr + phys) : 0u; }
 bool g_have_vi = false;
 
+// =================================================================================================================================
+// DESEMPENHO EM PCs FRACOS
+// (1) REPETICAO DE SCANOUT. O VI roda a 60 Hz e, em Legacy, o jogo desenha 30 quadros/s: metade dos scanouts reapresenta a MESMA imagem. Cada scanout e caro (passe de VI na
+//     GPU, espera, leitura de volta de ~1 MB, copia e envio ao apresentador: 2-3 ms numa GPU rapida, bem mais numa fraca). Se os registradores de VI sao os mesmos, nenhum comando
+//     de desenho foi para o buffer exibido desde o ultimo scanout e o conteudo desse buffer na RDRAM (hash) nao mudou, a imagem e identica: o quadro anterior e reapresentado
+//     sem refazer nada. WDC_NO_SCAN_REPEAT=1 desliga; WDC_SCAN_VERIFY=1 refaz o scanout mesmo assim e compara os pixels (teste: tem que dar 0 diferentes).
+// (2) GOVERNADOR DE QUADROS (display.performance = "auto"). Se a GPU/CPU nao acompanha, a thread do RDP bloqueia o jogo em cada SYNC_FULL e ele desacelera/engasga. O governador
+//     mede quanto custa desenhar um quadro e, se nao cabe no periodo do jogo, PULA o desenho de alguns quadros (os comandos de estado e de carga de textura passam, os de
+//     desenho nao; o SYNC_FULL e atendido na hora): o jogo segue em tempo real e a tela mostra o ultimo quadro desenhado. Num PC que acompanha, nunca entra em acao.
+// =================================================================================================================================
+using PresentRepeatFn = void (*)(int64_t);
+PresentRepeatFn g_present_repeat = nullptr;
+const bool g_scan_repeat_enabled = std::getenv("WDC_NO_SCAN_REPEAT") == nullptr;
+const bool g_scan_verify = std::getenv("WDC_SCAN_VERIFY") != nullptr;
+const double g_fake_frame_ms = std::getenv("WDC_FAKE_FRAME_MS") ? std::atof(std::getenv("WDC_FAKE_FRAME_MS")) : 0.0;   // teste: GPU lenta simulada (ms por quadro desenhado)
+const double g_fake_scan_ms = std::getenv("WDC_FAKE_SCAN_MS") ? std::atof(std::getenv("WDC_FAKE_SCAN_MS")) : 0.0;     // teste: ms extras por scanout real
+const double g_gov_force = std::getenv("WDC_GOV_FORCE") ? std::atof(std::getenv("WDC_GOV_FORCE")) : 0.0;              // teste: fracao fixa de quadros desenhados (0 = automatico)
+size_t g_rdram_size = 0x400000;
+
+struct ScanMemo { bool valid = false; uint32_t regs[14] = {}; uint64_t hash = 0; std::vector<RDP::RGBA> px; unsigned w = 0, h = 0; uint64_t cmds = 0; bool mid_frame = false; } g_memo;
+uint32_t g_dirty[8]; int g_dirty_n = 0; bool g_dirty_all = false;   // color images (24 bits) que receberam desenho desde o ultimo scanout real
+uint32_t g_stale[8]; int g_stale_n = 0;                            // color images cujo ultimo quadro foi PULADO (conteudo velho: nao serve de scanout)
+uint32_t g_cur_cimg = 0;                                           // SET_COLOR_IMAGE vigente no fluxo de comandos
+bool g_verify_candidate = false;
+int g_repeat_run = 0;   // repeticoes seguidas: no maximo 1 (o par de ticks de VI de cada quadro de 30 Hz); limita a um tick qualquer erro de repeticao
+uint64_t g_scan_repeats = 0, g_scan_verify_ok = 0, g_scan_verify_bad = 0, g_stale_ticks = 0, g_gov_skipped_cmds = 0, g_verify_ndiff = 0;
+unsigned g_verify_maxd = 0;
+uint64_t g_verify_big = 0;
+
+// Bytes do framebuffer exibido (so o que o VI le: largura x linhas x bytes por pixel, mais uma folga para os filtros). 0 = VI apagado.
+uint32_t vi_fb_span(const uint32_t* r) {
+    const uint32_t bpp = (r[0] & 3) == 3 ? 4u : (r[0] & 3) == 2 ? 2u : 0u;   // VI_STATUS: tipo de pixel (2 = 16 bits, 3 = 32 bits)
+    const uint32_t width = r[2] & 0xFFF;
+    if (!bpp || !width) return 0;
+    const int half = (int)(r[10] & 0x3FF) - (int)((r[10] >> 16) & 0x3FF);   // V_START em meias-linhas
+    const uint32_t lines = (uint32_t)(half > 0 ? half >> 1 : 0) * (r[13] & 0xFFF) / 1024u + 8u;   // Y_SCALE em ponto fixo 2.10
+    const uint32_t origin = r[1] & 0xFFFFFF;
+    uint32_t span = width * bpp * lines;
+    if (origin >= g_rdram_size) return 0;
+    if (span > g_rdram_size - origin) span = (uint32_t)(g_rdram_size - origin);
+    return span;
+}
+uint64_t vi_fb_hash(const uint32_t* r, uint32_t span) {
+    const uint32_t origin = (r[1] & 0xFFFFFF) & ~7u;
+    if (!g_rdram_ptr || origin >= g_rdram_size) return 0;
+    if (span > g_rdram_size - origin) span = (uint32_t)(g_rdram_size - origin);
+    const uint8_t* p = g_rdram_ptr + origin;
+    constexpr uint64_t K = 0x9E3779B97F4A7C15ull;
+    uint64_t h0 = 0x243F6A8885A308D3ull, h1 = 0x13198A2E03707344ull, h2 = 0xA4093822299F31D0ull, h3 = 0x082EFA98EC4E6C89ull;
+    size_t n = span / 32;
+    for (; n; n--, p += 32) {
+        uint64_t a, b, c, d;
+        std::memcpy(&a, p, 8); std::memcpy(&b, p + 8, 8); std::memcpy(&c, p + 16, 8); std::memcpy(&d, p + 24, 8);
+        h0 = (h0 ^ a) * K; h0 ^= h0 >> 32;
+        h1 = (h1 ^ b) * K; h1 ^= h1 >> 32;
+        h2 = (h2 ^ c) * K; h2 ^= h2 >> 32;
+        h3 = (h3 ^ d) * K; h3 ^= h3 >> 32;
+    }
+    for (size_t t = (span % 32) / 8; t; t--, p += 8) { uint64_t a; std::memcpy(&a, p, 8); h0 = (h0 ^ a) * K; h0 ^= h0 >> 32; }
+    return h0 ^ (h1 * 3) ^ (h2 * 5) ^ (h3 * 7) ^ span;
+}
+inline bool vi_same_regs(const uint32_t* a, const uint32_t* b) {   // V_CURRENT (4) so conta a paridade (campo, em modo entrelacado)
+    for (int i = 0; i < 14; i++) {
+        if (i == 4) { if ((a[4] ^ b[4]) & 1u) return false; continue; }
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
+inline bool near_buf(uint32_t a, uint32_t b, uint32_t span) { return (int32_t)(a - b) < (int32_t)span && (int32_t)(b - a) < (int32_t)span; }   // dois buffers do mesmo formato se sobrepoem
+void dirty_add(uint32_t c) {
+    for (int i = 0; i < g_dirty_n; i++) if (g_dirty[i] == c) return;
+    if (g_dirty_n < 8) g_dirty[g_dirty_n++] = c; else g_dirty_all = true;
+}
+bool dirty_hits(uint32_t origin, uint32_t span) {
+    if (g_dirty_all) return true;
+    for (int i = 0; i < g_dirty_n; i++) if (near_buf(g_dirty[i], origin, span)) return true;
+    return false;
+}
+void stale_add(uint32_t c) {
+    for (int i = 0; i < g_stale_n; i++) if (g_stale[i] == c) return;
+    if (g_stale_n == 8) { std::memmove(g_stale, g_stale + 1, 7 * sizeof(uint32_t)); g_stale_n--; }
+    g_stale[g_stale_n++] = c;
+}
+void stale_remove(uint32_t c) {
+    for (int i = 0; i < g_stale_n; i++) if (g_stale[i] == c) { std::memmove(g_stale + i, g_stale + i + 1, (size_t)(g_stale_n - i - 1) * sizeof(uint32_t)); g_stale_n--; return; }
+}
+bool stale_hits(uint32_t origin) {   // o origin do VI e a base do buffer (ou uma linha adiante, em campos): casamento exato; um falso positivo congelaria a tela
+    for (int i = 0; i < g_stale_n; i++) if ((uint32_t)(origin - g_stale[i]) < 0x4000u) return true;
+    return false;
+}
+
 void write_png(const char* path, const std::vector<RDP::RGBA>& px, unsigned w, unsigned h) {
     std::vector<uint8_t> rgba(w * h * 4);
     for (size_t i = 0; i < px.size(); i++) { rgba[4 * i] = px[i].r; rgba[4 * i + 1] = px[i].g; rgba[4 * i + 2] = px[i].b; rgba[4 * i + 3] = 255; }
@@ -176,6 +273,92 @@ void write_png(const char* path, const std::vector<RDP::RGBA>& px, unsigned w, u
 
 using PresentFn = void (*)(const uint8_t*, unsigned, unsigned, int64_t);
 PresentFn g_present = nullptr;              // modo interativo: recebe cada quadro do scanout (RGBA8)
+
+// Governador de quadros (ver o comentario do bloco de desempenho). Roda so na thread do RDP.
+struct Governor {
+    bool user_enabled = true;                  // display.performance = "auto"
+    double period_ms = 1000.0 / 30.0;          // periodo do quadro do jogo (Legacy 30 Hz; Enhanced 60 Hz)
+    double frac = 1.0, credit = 1.0;           // fracao dos quadros que sao desenhados; acumulador
+    double cost_ema = 0.0, scan_ema = 0.0, spf = 1.0;   // custo de um quadro desenhado (ms), de um scanout real (ms), scanouts reais por quadro desenhado
+    int cost_n = 0, scan_n = 0;
+    bool in_frame = false, skip = false;
+    std::chrono::steady_clock::time_point frame_start;
+    uint32_t cimgs[8]; int cimg_n = 0;         // color images vistos no quadro corrente
+    int since_update = 0;
+    uint64_t rendered = 0, skipped = 0, rendered_at_update = 0, scans_at_update = 0;
+    double min_frac = 1.0;
+    double gap_ema = 0.0;                      // intervalo medio (relogio real, ms) entre quadros do jogo (SYNC_FULL a SYNC_FULL)
+    std::chrono::steady_clock::time_point last_end;
+    bool have_last = false;
+    int log_lines = 0;
+    double logged_frac = 1.0;
+} g_gov;
+
+bool gov_decide_skip() {
+    if (!g_gov.user_enabled || !g_present) return false;
+    if (g_gov_force > 0.0 && g_gov_force < 1.0) g_gov.frac = g_gov_force;
+    if (g_gov.frac >= 0.999) { g_gov.credit = 1.0; return false; }
+    g_gov.credit += g_gov.frac;
+    if (g_gov.credit >= 1.0) { g_gov.credit -= 1.0; return false; }
+    return true;
+}
+
+void gov_scan_sample(double ms) {
+    g_gov.scan_ema = g_gov.scan_n == 0 ? ms : g_gov.scan_ema + 0.1 * (std::min(ms, 100.0) - g_gov.scan_ema);
+    g_gov.scan_n++;
+}
+
+void gov_update() {
+    if (!g_gov.user_enabled || !g_present || g_gov_force > 0.0) return;
+    if (++g_gov.since_update < 8 || g_gov.cost_n < 8 || g_syncs.load() < 150) return;   // so depois de ~5 s: a abertura (shaders, carga) nao conta
+    g_gov.since_update = 0;
+    // So entra em acao se o jogo ja esta ATRASADO (intervalo medio > 10% acima do periodo): o RDP trabalha em paralelo com o jogo, e custo alto sem atraso nao pede nada.
+    // Ja em acao (frac < 1), quem decide e o modelo de custo ate ele dizer que cabe tudo.
+    if (g_gov.frac >= 1.0 && g_gov.gap_ema < 1.10 * g_gov.period_ms) return;
+    const uint64_t dr = g_gov.rendered - g_gov.rendered_at_update, ds = g_scanouts.load() - g_gov.scans_at_update;
+    g_gov.rendered_at_update = g_gov.rendered; g_gov.scans_at_update = g_scanouts.load();
+    if (dr) g_gov.spf += 0.3 * (std::max(0.5, std::min(2.5, (double)ds / (double)dr)) - g_gov.spf);
+    const double unit = g_gov.cost_ema + g_gov.scan_ema * g_gov.spf;       // custo na thread do RDP por quadro desenhado
+    const double budget = 0.78 * g_gov.period_ms;                           // folga de 22% para o resto (RSP, audio, apresentacao)
+    double target = unit > 0.01 ? budget / unit : 1.0;
+    target = std::max(0.34, std::min(1.0, target));
+    if (target >= 0.97) target = 1.0;
+    const double before = g_gov.frac;
+    g_gov.frac = target < g_gov.frac ? target : std::min(target, g_gov.frac + 0.05);   // desce na hora, sobe devagar
+    if (g_gov.frac < g_gov.min_frac) g_gov.min_frac = g_gov.frac;
+    if (std::fabs(g_gov.frac - g_gov.logged_frac) >= 0.1 || (g_gov.frac >= 1.0 && g_gov.logged_frac < 1.0) || (before >= 1.0 && g_gov.frac < 1.0)) {
+        if (g_gov.log_lines++ < 60)
+            std::printf("[gov %7.2fs] desenhando %.0f%% dos quadros (custo do quadro %.1f ms + scanout %.1f ms x %.2f; orcamento %.1f ms de %.1f)\n", wdc_now_s(), g_gov.frac * 100.0,
+                        g_gov.cost_ema, g_gov.scan_ema, g_gov.spf, budget, g_gov.period_ms);
+        g_gov.logged_frac = g_gov.frac;
+    }
+}
+
+// Fim de um quadro (SYNC_FULL atendido). L = do primeiro lote do quadro ate a GPU terminar; W = espera da GPU no SYNC_FULL; enq = CPU enfileirando o ultimo lote.
+void gov_frame_end(double L_ms, double W_ms, double enq_ms) {
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (g_gov.have_last) {
+            const double gap = std::min(200.0, std::chrono::duration<double, std::milli>(now - g_gov.last_end).count());
+            g_gov.gap_ema = g_gov.gap_ema == 0.0 ? gap : g_gov.gap_ema + 0.1 * (gap - g_gov.gap_ema);
+        }
+        g_gov.last_end = now; g_gov.have_last = true;
+    }
+    if (g_gov.skip) {
+        g_gov.skipped++;
+        for (int k = 0; k < g_gov.cimg_n; k++) stale_add(g_gov.cimgs[k]);
+    } else {
+        g_gov.rendered++;
+        for (int k = 0; k < g_gov.cimg_n; k++) stale_remove(g_gov.cimgs[k]);
+        // So custa ao governador o que PULAR quadros alivia: se a GPU acompanhou a producao dos comandos (W ~ 0), o tempo L e do RSP/jogo, nao do RDP.
+        const double sample = std::min(W_ms >= 1.5 ? L_ms : W_ms + enq_ms, 2.0 * g_gov.period_ms);   // uma travada isolada (compilacao de shader) nao vale por muitos quadros
+        g_gov.cost_ema = g_gov.cost_n == 0 ? sample : g_gov.cost_ema + 0.12 * (sample - g_gov.cost_ema);
+        g_gov.cost_n++;
+    }
+    g_gov.in_frame = false;
+    g_gov.cimg_n = 0;
+    gov_update();
+}
 
 // ---------------------------------------------------------------------------------------------------------------------------------
 // Detector de "quadro intruso" (WDC_FLICKER=<pasta>): faz o scanout de TODO quadro, reduz cada um a uma grade 80x60 de luminancia e procura o padrao
@@ -311,8 +494,62 @@ void do_scanout(bool want_shot, int64_t t_vi_us) {
     }
     std::vector<RDP::RGBA> px;
     unsigned w = 0, h = 0;
+    const auto ts0 = std::chrono::steady_clock::now();
+    if (g_fake_scan_ms > 0.0) std::this_thread::sleep_for(std::chrono::microseconds((long long)(g_fake_scan_ms * 1000.0)));
     g_proc->scanout_sync(px, w, h, opts);
+    {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ts0).count();
+        g_scan_ms_total += ms;
+        if (ms > g_scan_ms_max) g_scan_ms_max = ms;
+    }
     g_scanouts++;
+    if (w && h && g_scan_repeat_enabled) {   // memoria do ultimo scanout real (ver REPETICAO DE SCANOUT)
+        const uint32_t span = vi_fb_span(g_vi_latest);
+        if (span) {
+            if (g_scan_verify && g_memo.valid && g_verify_candidate) {   // teria sido repetido: a imagem tem que ser identica
+                const bool dims = g_memo.w == w && g_memo.h == h && g_memo.px.size() == px.size();
+                unsigned maxd = 0;
+                size_t nd = 0;
+                if (dims) {
+                    const uint8_t* a = (const uint8_t*)g_memo.px.data();
+                    const uint8_t* b = (const uint8_t*)px.data();
+                    for (size_t q = 0; q < px.size(); q++) {
+                        unsigned d = 0;
+                        for (int c = 0; c < 3; c++) d = std::max<unsigned>(d, (unsigned)std::abs((int)a[4 * q + c] - (int)b[4 * q + c]));
+                        if (d) { nd++; maxd = std::max(maxd, d); }
+                    }
+                }
+                if (dims && !nd) g_scan_verify_ok++;
+                else {
+                    g_scan_verify_bad++; g_verify_ndiff += nd; g_verify_maxd = std::max(g_verify_maxd, dims ? maxd : 999u);
+                    static int dbg = 0;
+                    if (!dims || maxd > 2) g_verify_big++;   // ruido de dither do VI (+-1) nao conta
+                    if (dbg < 6 && (!dims || maxd > 2)) {   // depuracao: os dois quadros e os registradores de VI (WDC_VERIFY_DIR = pasta)
+                        const char* dir = std::getenv("WDC_VERIFY_DIR");
+                        std::printf("[verify] ndiff=%zu maxd=%u dims=%d span=%u cmds=%llu (memo em %llu; memo no meio de um quadro: %d; agora no meio de um quadro: %d; sujos: %d%s; cimg atual %06X)\n  regs novo: ", nd, maxd, (int)dims, span,
+                                    (unsigned long long)g_cmds.load(), (unsigned long long)g_memo.cmds, (int)g_memo.mid_frame, (int)g_gov.in_frame, g_dirty_n, g_dirty_all ? "+tudo" : "", g_cur_cimg);
+                        for (int q = 0; q < 14; q++) std::printf("%08X ", g_vi_latest[q]);
+                        std::printf("\n  regs memo: ");
+                        for (int q = 0; q < 14; q++) std::printf("%08X ", g_memo.regs[q]);
+                        std::printf("\n");
+                        if (dir) {
+                            char pa[512], pb[512];
+                            std::snprintf(pa, sizeof pa, "%s/bad%d_memo.png", dir, dbg);
+                            std::snprintf(pb, sizeof pb, "%s/bad%d_new.png", dir, dbg);
+                            write_png(pa, g_memo.px, g_memo.w, g_memo.h);
+                            write_png(pb, px, w, h);
+                        }
+                        dbg++;
+                    }
+                }
+            }
+            std::memcpy(g_memo.regs, g_vi_latest, sizeof g_memo.regs);
+            g_memo.hash = vi_fb_hash(g_vi_latest, span);
+            g_memo.w = w; g_memo.h = h; g_memo.valid = true; g_memo.cmds = g_cmds.load(); g_memo.mid_frame = g_gov.in_frame;
+            if (g_scan_verify) g_memo.px = px;
+            g_dirty_n = 0; g_dirty_all = false;
+        } else g_memo.valid = false;
+    } else g_memo.valid = false;
     if (want_shot && w && h) {
         write_png(shot_name().c_str(), px, w, h);
         g_shot_index++;
@@ -339,7 +576,32 @@ void process_vi(Job& j) {   // Vi: fim de quadro
     g_have_vi = true;
     g_frames++;
     const bool shot = g_shot_pending.load() && wdc_now_s() >= g_shot_after && g_syncs.load() > 0;
-    if (shot || g_present || g_flick_dir) do_scanout(shot, j.t_us);
+    g_vi_ticks++;
+    bool repeated = false;
+    if (g_present_repeat && g_present && !shot && !g_flick_dir) {
+        const uint32_t origin = j.vi[1] & 0xFFFFFF, span = vi_fb_span(j.vi);
+        if (span && g_stale_n && stale_hits(origin)) {   // governador: este buffer guarda um quadro pulado (velho): continua a imagem anterior
+            g_present_repeat(j.t_us);
+            g_stale_ticks++;
+            repeated = true;
+        } else if (g_scan_repeat_enabled && !g_deglitch && span && g_memo.valid && g_repeat_run < 1 && vi_same_regs(g_memo.regs, j.vi) && !dirty_hits(origin, span)) {
+            g_vi_dup_candidates++;
+            if (vi_fb_hash(j.vi, span) == g_memo.hash) {
+                if (g_scan_verify) g_verify_candidate = true;   // modo de teste: faz o scanout de verdade e compara
+                else { g_present_repeat(j.t_us); g_scan_repeats++; g_repeat_run++; repeated = true; }
+            }
+        }
+    }
+    if (!repeated && (shot || g_present || g_flick_dir)) {
+        const auto tv0 = std::chrono::steady_clock::now();
+        do_scanout(shot, j.t_us);
+        g_verify_candidate = false;
+        g_repeat_run = 0;
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tv0).count();
+        g_vi_ms_total += ms;
+        if (ms > g_vi_ms_max) g_vi_ms_max = ms;
+        gov_scan_sample(ms);
+    }
     g_proc->begin_frame_context();
     if (g_gate_on.load()) {   // o buffer exibido deixa de estar pendente
         const uint32_t origin = j.vi[1] & 0xFFFFFF;
@@ -389,6 +651,8 @@ void gate_wait(const Job& j) {
 }
 
 void thread_main() {
+    wdc_set_thread_name(L"wdc-rdp");
+    wdc_thread_above_normal();   // o jogo espera por esta thread em cada SYNC_FULL
     Util::register_thread_index(0);   // so esta thread usa o dispositivo depois da init; sem registro o parallel-rdp loga um erro a cada chamada
     while (true) {
         Job j;
@@ -477,15 +741,32 @@ void thread_main() {
                     g_cimg_cur = a;
                 }
                 if (g_flick_dir) { const uint32_t op = (w[0] >> 24) & 0x3F; if ((op >= 0x08 && op <= 0x0F) || op == 0x24 || op == 0x25 || op == 0x36) g_ndraw_since++; }
+                const uint32_t op_g = (w[0] >> 24) & 0x3F;
+                if (!g_gov.in_frame) { g_gov.in_frame = true; g_gov.frame_start = tj0; g_gov.cimg_n = 0; g_gov.skip = gov_decide_skip(); }
+                if (op_g == 0x3F && n >= 2) {   // SET_COLOR_IMAGE
+                    g_cur_cimg = w[1] & 0xFFFFFF;
+                    if (g_gov.cimg_n < 8) { bool seen = false; for (int k = 0; k < g_gov.cimg_n; k++) seen |= g_gov.cimgs[k] == g_cur_cimg; if (!seen) g_gov.cimgs[g_gov.cimg_n++] = g_cur_cimg; }
+                }
+                if ((op_g >= 0x08 && op_g <= 0x0F) || op_g == 0x24 || op_g == 0x25 || op_g == 0x36) {   // desenho: triangulos, retangulos de textura, retangulo de preenchimento
+                    if (g_gov.skip) { g_gov_skipped_cmds++; i += n + 1; continue; }   // quadro pulado: estado e texturas passam, o desenho nao
+                    dirty_add(g_cur_cimg);
+                }
                 g_proc->enqueue_command(n, w);
                 g_cmds++;
-                if (((w[0] >> 24) & 0x3F) == 0x29) {   // SYNC_FULL: esperar a GPU e so entao avisar o jogo
+                if (op_g == 0x29) {   // SYNC_FULL: esperar a GPU e so entao avisar o jogo
                     const double cpu_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tj0).count();   // CPU so enfileirando os comandos deste quadro
                     if (cpu_ms > g_cpu_ms_max) g_cpu_ms_max = cpu_ms;
                     const double t0 = wdc_now_s();
+                    if (g_fake_frame_ms > 0.0 && !g_gov.skip) std::this_thread::sleep_for(std::chrono::microseconds((long long)(g_fake_frame_ms * 1000.0)));   // teste: GPU lenta simulada
                     g_proc->wait_for_timeline(g_proc->signal_timeline());
                     const double dt = wdc_now_s() - t0;
+                    const double gov_L_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g_gov.frame_start).count();
                     g_sync_wait_total += dt;
+                    g_enq_ms_total += cpu_ms;
+                    {
+                        const double busy = cpu_ms + dt * 1000.0;
+                        g_busy_hist[busy < 8 ? 0 : busy < 16 ? 1 : busy < 24 ? 2 : busy < 30 ? 3 : busy < 36 ? 4 : busy < 50 ? 5 : 6]++;
+                    }
                     if (dt > g_sync_wait_max) g_sync_wait_max = dt;
                     g_syncs++;
                     if (g_syncs.load() == 6000) save_pipeline_cache();   // uma vez no meio da sessao, para nao perder se o programa for encerrado a forca
@@ -508,6 +789,7 @@ void thread_main() {
                         last_sync_t = now;
                     }
                     wdc_post_dp();
+                    gov_frame_end(gov_L_ms, dt * 1000.0, cpu_ms);
                 }
                 i += n + 1;
             }
@@ -568,6 +850,9 @@ bool wdc_rdp_vk_init(uint8_t* rdram, size_t rdram_size, int gpu_index) {
     // o filtro de 3 pontos as espalha na diagonal, o que parece "motion blur" no cenario em movimento (parede, pista). Legacy nao muda. WDC_POINT_TEX=1 forca em qualquer modo (teste).
     RDP::g_wdc_point_sampling = wdc_cfg().sharp_textures || std::getenv("WDC_POINT_TEX") != nullptr;
     g_deglitch = wdc_cfg().fps60 && !std::getenv("WDC_NO_DEGLITCH");   // filtro de quadro intruso (so Enhanced a 60 Hz)
+    g_rdram_size = rdram_size;
+    g_gov.user_enabled = wdc_cfg().perf_auto && !wdc_cfg().fps60 && !std::getenv("WDC_NO_GOV");   // so no Legacy: no Enhanced (60 Hz so em corrida, 30 Hz nos menus) nao ha periodo unico, e quem quer qualidade e escala alta aceita o custo
+    g_gov.period_ms = wdc_cfg().fps60 ? 1000.0 / 60.0 : 1000.0 / 30.0;
     g_active = true;
     g_thread = std::thread(thread_main);
     g_thread.detach();
@@ -645,6 +930,7 @@ void wdc_rdp_vk_dump_fb(const char* path, uint32_t addr, uint32_t width, uint32_
 }
 
 void wdc_rdp_vk_set_present(void (*fn)(const uint8_t*, unsigned, unsigned, int64_t)) { g_present = fn; }
+void wdc_rdp_vk_set_present_repeat(void (*fn)(int64_t)) { g_present_repeat = fn; }
 void wdc_rdp_vk_request_shot(const char* path, double after_seconds) {
     g_shot_path = path;
     g_shot_after = after_seconds;
@@ -664,6 +950,19 @@ void wdc_rdp_vk_print_stats() {
     std::printf("[rdp-vk] intervalo entre quadros (ms): <20=%llu 20-30=%llu 30-40=%llu 40-60=%llu 60-100=%llu 100-200=%llu >=200=%llu; quadros com > 20 ms de CPU so enfileirando: %llu (maximo %.1f ms)\n",
                 (unsigned long long)g_gap_hist[0], (unsigned long long)g_gap_hist[1], (unsigned long long)g_gap_hist[2], (unsigned long long)g_gap_hist[3], (unsigned long long)g_gap_hist[4],
                 (unsigned long long)g_gap_hist[5], (unsigned long long)g_gap_hist[6], (unsigned long long)g_slow_cpu_frames, g_cpu_ms_max);
+    std::printf("[rdp-vk] custo por quadro do RDP (CPU enfileirando + espera da GPU, ms): <8=%llu <16=%llu <24=%llu <30=%llu <36=%llu <50=%llu >=50=%llu; CPU enfileirando: media %.2f ms\n",
+                (unsigned long long)g_busy_hist[0], (unsigned long long)g_busy_hist[1], (unsigned long long)g_busy_hist[2], (unsigned long long)g_busy_hist[3],
+                (unsigned long long)g_busy_hist[4], (unsigned long long)g_busy_hist[5], (unsigned long long)g_busy_hist[6], g_syncs.load() ? g_enq_ms_total / (double)g_syncs.load() : 0.0);
+    if (g_scanouts.load())
+        std::printf("[rdp-vk] scanouts: %llu de %llu ticks de VI; scanout_sync: media %.2f ms, maximo %.2f ms; scanout completo (com entrega): media %.2f ms, maximo %.2f ms; candidatos a repeticao: %llu\n",
+                    (unsigned long long)g_scanouts.load(), (unsigned long long)g_vi_ticks, g_scan_ms_total / (double)g_scanouts.load(), g_scan_ms_max,
+                    g_vi_ms_total / (double)g_scanouts.load(), g_vi_ms_max, (unsigned long long)g_vi_dup_candidates);
+    std::printf("[rdp-vk] repeticao de scanout: %llu reapresentados sem refazer (%llu candidatos)%s; ", (unsigned long long)g_scan_repeats, (unsigned long long)g_vi_dup_candidates, g_scan_repeat_enabled ? "" : " (DESLIGADA)");
+    if (g_scan_verify) std::printf("verificacao: %llu iguais, %llu diferentes (diferenca maxima por canal %u; media de %.0f pixels por quadro), das quais %llu com diferenca > 2 (ruido de dither e +-1); ", (unsigned long long)g_scan_verify_ok,
+                                   (unsigned long long)g_scan_verify_bad, g_verify_maxd, g_scan_verify_bad ? (double)g_verify_ndiff / (double)g_scan_verify_bad : 0.0, (unsigned long long)g_verify_big);
+    std::printf("governador (%s): %llu quadros desenhados, %llu pulados (%llu comandos de desenho), menor fracao %.2f, custo %.1f ms + scanout %.1f ms; ticks de VI com buffer velho: %llu\n",
+                g_gov.user_enabled ? "auto" : "desligado", (unsigned long long)g_gov.rendered, (unsigned long long)g_gov.skipped, (unsigned long long)g_gov_skipped_cmds, g_gov.min_frac,
+                g_gov.cost_ema, g_gov.scan_ema, (unsigned long long)g_stale_ticks);
     std::printf("[rdp-vk] comandos enviados a GPU: %llu; SYNC_FULL: %llu (espera media %.2f ms, maxima %.2f ms); quadros: %llu; scanouts: %llu\n",
                 (unsigned long long)g_cmds.load(), (unsigned long long)g_syncs.load(),
                 g_syncs.load() ? 1000.0 * g_sync_wait_total / (double)g_syncs.load() : 0.0, 1000.0 * g_sync_wait_max,

@@ -1,4 +1,5 @@
 // Apresentador em GPU (ver wdc_present.h).
+#include "wdc_logs.h"
 #include "wdc_present.h"
 
 #include <algorithm>
@@ -52,6 +53,9 @@ int g_base_above = 0;
 double g_lag_peak = 20000.0;          // pico (us) do atraso VI -> entrega do quadro, com decaimento lento (folga adaptativa)                // quadros seguidos com a diferenca muito acima da base
 std::atomic<int64_t> g_vblank_us{8333};   // periodo do vblank (media movel dos intervalos entre apresentacoes)
 HANDLE g_new_frame = nullptr;        // evento: ha quadro novo (usado com v-sync desligado)
+
+std::shared_ptr<uint8_t[]> g_last_buf;   // ultimo quadro publicado (para wdc_present_repeat); protegido por g_mu
+unsigned g_last_w = 0, g_last_h = 0;
 
 std::atomic<bool> g_active{false};
 std::atomic<bool> g_quit{false};
@@ -344,6 +348,7 @@ void resize_if_needed(Gfx& g) {
 }
 
 void thread_main(std::promise<bool> ready) {
+    wdc_set_thread_name(L"wdc-present");
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);   // perder um vblank por causa de carga da CPU vira judder
     Gfx g;
     const bool ok = init_gfx(g);
@@ -354,6 +359,7 @@ void thread_main(std::promise<bool> ready) {
     const int64_t t_start = now_us();
     bool shot_done = false;
     int64_t last_present_us = 0;
+    std::shared_ptr<uint8_t[]> uploaded;   // quadro que ja esta na textura da GPU: um quadro repetido (mesmo buffer) nao precisa ser reenviado
     unsigned cur_hold = 0;   // vblanks desde o ultimo quadro novo
     double recent[16] = {};
     size_t recent_n = 0;
@@ -411,7 +417,7 @@ void thread_main(std::promise<bool> ready) {
                 if (lead_ms > g_lead_max_ms.load()) g_lead_max_ms = lead_ms;
             }
             if (vsync && now_us() - f.due_us > g_vblank_us.load() * 3 / 2) g_overdue++;   // chegou mais de 1,5 vblank depois do previsto (o buffer de jitter nao bastou)
-            upload(g, f);
+            if (f.px != uploaded) { upload(g, f); uploaded = f.px; }
             g_displayed_new++;
         } else if (!vsync) {
             continue;   // sem v-sync so apresenta quando ha quadro novo
@@ -468,12 +474,11 @@ bool wdc_present_active() { return g_active.load(); }
 
 int64_t wdc_present_now_us() { return now_us(); }
 
-void wdc_present_frame(const uint8_t* rgba, unsigned w, unsigned h, int64_t t_vi_us) {
-    if (!w || !h || !g_active.load()) return;
-    std::shared_ptr<uint8_t[]> buf = std::make_shared_for_overwrite<uint8_t[]>((size_t)w * h * 4);
-    std::memcpy(buf.get(), rgba, (size_t)w * h * 4);
+static void publish_frame(std::shared_ptr<uint8_t[]> buf, unsigned w, unsigned h, int64_t t_vi_us) {
     {
         std::lock_guard<std::mutex> l(g_mu);
+        g_last_buf = buf;
+        g_last_w = w; g_last_h = h;
         const uint64_t k = ++g_seq;
         const double off = (double)t_vi_us - (double)k * kViPeriodUs;
         if (!g_base_init) { g_base_us = off; g_base_init = true; }
@@ -500,6 +505,24 @@ void wdc_present_frame(const uint8_t* rgba, unsigned w, unsigned h, int64_t t_vi
     }
     g_published++;
     SetEvent(g_new_frame);
+}
+
+void wdc_present_frame(const uint8_t* rgba, unsigned w, unsigned h, int64_t t_vi_us) {
+    if (!w || !h || !g_active.load()) return;
+    std::shared_ptr<uint8_t[]> buf = std::make_shared_for_overwrite<uint8_t[]>((size_t)w * h * 4);
+    std::memcpy(buf.get(), rgba, (size_t)w * h * 4);
+    publish_frame(std::move(buf), w, h, t_vi_us);
+}
+
+void wdc_present_repeat(int64_t t_vi_us) {
+    if (!g_active.load()) return;
+    std::shared_ptr<uint8_t[]> buf;
+    unsigned w = 0, h = 0;
+    {
+        std::lock_guard<std::mutex> l(g_mu);
+        buf = g_last_buf; w = g_last_w; h = g_last_h;
+    }
+    if (buf && w && h) publish_frame(std::move(buf), w, h, t_vi_us);
 }
 
 void wdc_present_shutdown() {

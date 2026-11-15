@@ -1,0 +1,64 @@
+diff --git a/vulkan/command_buffer.cpp b/vulkan/command_buffer.cpp
+index 2535abe..0507891 100644
+--- a/vulkan/command_buffer.cpp
++++ b/vulkan/command_buffer.cpp
+@@ -28,6 +28,8 @@
+ #include "vulkan_prerotate.hpp"
+ #include "indirect_layout.hpp"
+ #include "timer.hpp"
++#include <atomic>
++#include <stdlib.h>
+ #include <string.h>
+ 
+ using namespace Util;
+@@ -1020,6 +1022,12 @@ void CommandBuffer::end_render_pass()
+ 	begin_compute();
+ }
+ 
++// WDC: alguns drivers (Intel no Windows, medido: 39 compilacoes de 150-450 ms no ring thread) ignoram VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT e compilam
++// na hora, travando o jogo em cada pipeline novo (cache frio). Se uma tentativa "sem bloquear" demora mais que alguns ms, o driver nao a honra: dali em diante as tentativas
++// devolvem falha na hora e a compilacao fica so com a thread de fundo (o pipeline generico de reserva e usado enquanto isso).
++static std::atomic<bool> g_wdc_cache_control_unreliable{false};
++static const bool g_wdc_stock_pipe = getenv("WDC_STOCK_PIPE") != nullptr;   // teste A/B: comportamento original do Granite
++
+ static void log_compile_time(const char *tag, Hash hash,
+                              int64_t time_ns, VkResult result,
+                              CommandBuffer::CompileMode mode)
+@@ -1078,6 +1086,7 @@ Pipeline CommandBuffer::build_compute_pipeline(Device *device, const DeferredPip
+ 	// we must assume compilation can be synchronous.
+ 	if (mode == CompileMode::FailOnCompileRequired &&
+ 	    (device->get_workarounds().broken_pipeline_cache_control ||
++	     (!g_wdc_stock_pipe && g_wdc_cache_control_unreliable.load(std::memory_order_relaxed)) ||
+ 	     !device->get_device_features().vk13_features.pipelineCreationCacheControl))
+ 	{
+ 		return {};
+@@ -1145,6 +1154,12 @@ Pipeline CommandBuffer::build_compute_pipeline(Device *device, const DeferredPip
+ 	VkResult vr = table.vkCreateComputePipelines(device->get_device(), compile.cache, 1, &info, nullptr, &compute_pipeline);
+ 	auto end_ts = Util::get_current_time_nsecs();
+ 	log_compile_time("compute", compile.hash, end_ts - start_ts, vr, mode);
++	if (!g_wdc_stock_pipe && mode == CompileMode::FailOnCompileRequired && end_ts - start_ts > 8 * 1000 * 1000 &&
++	    !g_wdc_cache_control_unreliable.exchange(true))
++	{
++		LOGW("WDC: o driver compilou na hora apesar de FAIL_ON_PIPELINE_COMPILE_REQUIRED (%.0f ms): a partir de agora a compilacao e so da thread de fundo.\n",
++		     1e-6 * double(end_ts - start_ts));
++	}
+ 
+ 	if (vr != VK_SUCCESS || compute_pipeline == VK_NULL_HANDLE)
+ 	{
+diff --git a/vulkan/device.cpp b/vulkan/device.cpp
+index 6623a9d..d1d43ec 100644
+--- a/vulkan/device.cpp
++++ b/vulkan/device.cpp
+@@ -895,6 +895,12 @@ void Device::init_workarounds()
+ 		LOGW("Disabling pipeline cache control.\n");
+ 		workarounds.broken_pipeline_cache_control = true;
+ 	}
++	else if ((ext.driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS || gpu_props.vendorID == 0x8086) && !getenv("WDC_STOCK_PIPE"))
++	{
++		// WDC: medido no driver Intel do Windows: a flag FAIL_ON_PIPELINE_COMPILE_REQUIRED nao e honrada (compila na hora, 150-450 ms por pipeline, no ring thread).
++		LOGW("Disabling pipeline cache control (Intel).\n");
++		workarounds.broken_pipeline_cache_control = true;
++	}
+ 
+ 	if (sync2_workarounds)
+ 	{

@@ -29,10 +29,10 @@ O programa usa o **N64ModernRuntime (GPL-3.0)**; por isso o projeto é distribu�
 ### Dependências e versões exatas (não copiadas aqui)
 | Projeto | Repositório | Commit usado | Licença |
 |---|---|---|---|
-| N64ModernRuntime (ultramodern + librecomp) | https://github.com/N64Recomp/N64ModernRuntime | `cdf5abbd5026fef5c364c676e4667c45e42b6863` + `patches/N64ModernRuntime-reserve-not-commit.patch` | GPL-3.0 |
+| N64ModernRuntime (ultramodern + librecomp) | https://github.com/N64Recomp/N64ModernRuntime | `cdf5abbd5026fef5c364c676e4667c45e42b6863` + `patches/N64ModernRuntime-reserve-not-commit.patch` + `patches/N64ModernRuntime-thread-priority.patch` | GPL-3.0 |
 | N64Recomp (submódulo do runtime) | https://github.com/N64Recomp/N64Recomp | `81213c1831fab2521a6a5459c67b63437d67e253` | MIT |
 | N64Recomp (ferramentas RSPRecomp) | https://github.com/N64Recomp/N64Recomp | `ffb39cdad1da5de07eaaa48bd1db4a89a7986771` + `patches/N64Recomp-RSPRecomp-wdc.patch` | MIT |
-| parallel-RDP (standalone) | https://github.com/Themaister/parallel-rdp-standalone | `388d70f5835b352d841d9d9e5a08c5de01470f41` + `patches/parallel-rdp-point-sampling.patch` | MIT |
+| parallel-RDP (standalone) | https://github.com/Themaister/parallel-rdp-standalone | `388d70f5835b352d841d9d9e5a08c5de01470f41` + `patches/parallel-rdp-point-sampling.patch` + `patches/parallel-rdp-thread-priority.patch` + `patches/parallel-rdp-async-pipelines.patch` | MIT |
 
 **Não estão aqui** (derivam do jogo): a ROM, o C e o microcódigo do RSP recompilados, os disassemblies e as listas geradas. Para compilar é preciso a sua ROM, gerar esses arquivos
 com as ferramentas (`tools/recomp/`) e ter o toolchain (Visual Studio Build Tools, LLVM/clang-cl, CMake, Ninja). Veja `recomp/ENHANCED_MODE.md` (§8–§10) e `tools/release/`.

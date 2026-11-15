@@ -8,6 +8,7 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <windows.h>
@@ -17,6 +18,7 @@
 #include <functiondiscoverykeys_devpkey.h>
 #include <io.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 
 namespace fs = std::filesystem;
 
@@ -200,6 +202,69 @@ void wdc_logs_system_info(const fs::path& exe_dir, const fs::path& config_dir) {
     wchar_t loc[LOCALE_NAME_MAX_LENGTH] = L"?";
     GetUserDefaultLocaleName(loc, LOCALE_NAME_MAX_LENGTH);
     std::printf("[sys] executavel: %s | pasta de config: %s | administrador: %s | idioma: %s\n", exe_dir.string().c_str(), config_dir.string().c_str(), elevated ? "sim" : "nao", utf8(loc).c_str());
+}
+
+double wdc_proc_cpu_seconds() {
+    FILETIME c, e, k, u;
+    if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return 0.0;
+    auto s = [](FILETIME f) { return (double)(((unsigned long long)f.dwHighDateTime << 32) | f.dwLowDateTime) / 1e7; };
+    return s(k) + s(u);
+}
+
+void wdc_set_thread_name(const wchar_t* name) {
+    using SetThreadDescription_t = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+    static auto f = (SetThreadDescription_t)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription");
+    if (f) f(GetCurrentThread(), name);
+}
+
+void wdc_logs_cpu_report() {
+    using GetThreadDescription_t = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+    static auto gtd = (GetThreadDescription_t)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
+    FILETIME ct, et, kt, ut;
+    double wall = 0.0;
+    if (GetProcessTimes(GetCurrentProcess(), &ct, &et, &kt, &ut)) {
+        FILETIME now;
+        GetSystemTimeAsFileTime(&now);
+        wall = (double)((((unsigned long long)now.dwHighDateTime << 32) | now.dwLowDateTime) - (((unsigned long long)ct.dwHighDateTime << 32) | ct.dwLowDateTime)) / 1e7;
+    }
+    struct T { double cpu; std::string name; };
+    std::vector<T> v;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        THREADENTRY32 te{};
+        te.dwSize = sizeof te;
+        const DWORD pid = GetCurrentProcessId();
+        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+            if (te.th32OwnerProcessID != pid) continue;
+            HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+            if (!h) continue;
+            FILETIME c2, e2, k2, u2;
+            if (GetThreadTimes(h, &c2, &e2, &k2, &u2)) {
+                auto s = [](FILETIME f) { return (double)(((unsigned long long)f.dwHighDateTime << 32) | f.dwLowDateTime) / 1e7; };
+                std::string nm = "tid " + std::to_string(te.th32ThreadID);
+                PWSTR d = nullptr;
+                if (gtd && SUCCEEDED(gtd(h, &d)) && d) { if (*d) nm = utf8(d); LocalFree(d); }
+                v.push_back({s(k2) + s(u2), nm});
+            }
+            CloseHandle(h);
+        }
+        CloseHandle(snap);
+    }
+    std::sort(v.begin(), v.end(), [](const T& a, const T& b) { return a.cpu > b.cpu; });
+    const double total = wdc_proc_cpu_seconds();
+    std::printf("[cpu] processo: %.1f s de CPU em %.1f s de relogio (%.0f%% de um nucleo); %lu processadores logicos\n", total, wall, wall > 0 ? 100.0 * total / wall : 0.0, []() { SYSTEM_INFO s; GetSystemInfo(&s); return s.dwNumberOfProcessors; }());
+    for (size_t i = 0; i < v.size() && i < 14; i++)
+        if (v[i].cpu >= 0.05) std::printf("[cpu]   %-16s %7.2f s  (%3.0f%% de um nucleo)\n", v[i].name.c_str(), v[i].cpu, wall > 0 ? 100.0 * v[i].cpu / wall : 0.0);
+}
+
+void wdc_thread_above_normal() {
+    if (!std::getenv("WDC_NO_PRIO")) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+}
+
+void wdc_perf_tune_start() {
+    if (std::getenv("WDC_NO_PRIO")) return;
+    SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+    std::printf("[perf] processo com prioridade acima do normal; VI no maximo, RSP/graficos/jogo/RDP acima do normal\n");
 }
 
 bool wdc_logs_open_folder() {

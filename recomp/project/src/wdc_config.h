@@ -28,6 +28,7 @@ struct WdcConfig {
     bool scale_auto = false;        // enhanced.internal_scale = "auto": a escala e escolhida pela GPU (wdc_cfg_resolve_auto_scale, chamada pelo renderizador)
     WdcAspect aspect = WdcAspect::Original;
     bool fullscreen = false;        // abrir em tela cheia (F11 alterna)
+    bool perf_auto = true;          // display.performance = "auto": se o PC nao acompanha, o RDP desenha menos quadros para o jogo nao desacelerar (PC rapido: nada muda). "off" = desenha todos
     // Botoes personalizados do controle XInput, por esquema (0 = classico, 1 = moderno) e acao (ver wdc_input.h, WdcAction). Texto cru da chave
     // [controls.classic]/[controls.modern] (ex.: "RT", "B+X", "none"); vazio ou "default" = o padrao do esquema. Interpretado por wdc_input.cpp.
     std::string bind[2][6];
