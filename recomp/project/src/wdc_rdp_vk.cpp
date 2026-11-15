@@ -278,11 +278,12 @@ void process_vi(Job& j) {   // Vi: fim de quadro
         static const bool vl = std::getenv("WDC_VI_LOG") != nullptr;
         static uint32_t last[14] = {};
         static int lines = 0;
-        if (vl && lines < 60 && std::memcmp(last, j.vi, sizeof(last)) != 0) {
+        uint32_t cur_cmp[14]; std::memcpy(cur_cmp, j.vi, sizeof cur_cmp); cur_cmp[1] = 0; cur_cmp[4] = 0;   // o ORIGIN (troca de buffer) e a linha atual nao contam como mudanca de modo
+        if (vl && lines < 200 && std::memcmp(last, cur_cmp, sizeof(last)) != 0) {
             lines++;
             std::printf("[vi %7.2fs] STATUS=%08X ORIGIN=%08X WIDTH=%u V_INTR=%u V_CUR=%u BURST=%08X V_SYNC=%u H_SYNC=%08X LEAP=%08X H_START=%08X V_START=%08X V_BURST=%08X X_SCALE=%08X Y_SCALE=%08X\n",
                         wdc_now_s(), j.vi[0], j.vi[1], j.vi[2], j.vi[3], j.vi[4], j.vi[5], j.vi[6], j.vi[7], j.vi[8], j.vi[9], j.vi[10], j.vi[11], j.vi[12], j.vi[13]);
-            std::memcpy(last, j.vi, sizeof(last));
+            std::memcpy(last, cur_cmp, sizeof(last));
         }
     }
     std::memcpy(g_vi_latest, j.vi, sizeof(g_vi_latest));

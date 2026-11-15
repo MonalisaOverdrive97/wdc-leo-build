@@ -188,3 +188,5 @@ Em **corrida ao vivo** (simulação rodando); **nos menus, na pausa e nas telas 
 4. **Legacy não mudou**: a abertura em Legacy continua com a imagem original (macia).
 
 **P2**: controle desconectado/reconectado durante a corrida volta a responder; vários controles ao mesmo tempo (jogador 2).
+
+**P1 (pop-in)**: 5. **Hawaii A e C — texture pop-in**: jogue com TEXTURAS = NÍTIDAS e com ORIGINAL N64 e me diga se o pop-in some no segundo caso.

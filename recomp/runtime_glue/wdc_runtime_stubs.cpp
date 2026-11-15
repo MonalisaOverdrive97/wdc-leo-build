@@ -13,6 +13,8 @@
 #include <thread>
 #include <cinttypes>
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <unordered_map>
 
 // OS_EVENT_SP_BREAK (11). O ucode do WDC usa o comando 0x12 ("sync", cmd_12_sync em wdc_ucode_annotated.s) como
@@ -345,6 +347,7 @@ extern "C" void wdc_blk_osRecvMesg(uint8_t* rdram, recomp_context* ctx) {
     if (g_wdc_skip_recv) { g_wdc_skip_recv = 0; ctx->r2 = 0; return; }
     blk_call('R', osRecvMesg_recomp, rdram, ctx);
 }
+
 extern "C" void wdc_blk_osSendMesg(uint8_t* rdram, recomp_context* ctx) { blk_call('S', osSendMesg_recomp, rdram, ctx); }
 extern "C" void wdc_blk_osJamMesg(uint8_t* rdram, recomp_context* ctx)  { blk_call('J', osJamMesg_recomp, rdram, ctx); }
 
