@@ -8,12 +8,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "wdc_config.h"
 #include "wdc_input.h"
 #include "wdc_joy.h"
+#include "wdc_logs.h"
 #include "wdc_setup_art.h"
 #include "wdc_version.h"
 
@@ -44,7 +47,7 @@ enum class Page { Main, Controls, Image, Wizard };
 enum Id : int {
     IdNone = -1,
     IdMode0 = 0, IdMode1, IdCtl0, IdCtl1, IdPlay, IdQuit, IdImagePage, IdCustomPage,   // pagina principal
-    IdShortcut,                                                                       // pagina principal: atalho na area de trabalho
+    IdShortcut, IdLogs,                                                               // pagina principal: atalho na area de trabalho / abrir a pasta dos logs
     IdWizard, IdWizSkip,                                                              // mapear controle: abrir o assistente / pular o botao atual
     IdBack, IdDefaults,                                                               // paginas internas: OK e Restaurar padrao
     IdTab0, IdTab1,                                                                   // personalizar: esquema que esta sendo editado
@@ -97,6 +100,114 @@ constexpr float kX0 = kArtW + 36, kPW = kW - kArtW - 72;   // coluna de conteudo
 
 float S(float v) { return v * g.s; }
 
+// ---- fontes: o setup usa "Impact" (titulos) e "Segoe UI" (texto). Em PCs sem elas o GDI+ cairia numa fonte padrao e a letra ficaria estranha; escolhemos a primeira instalada de uma lista ----
+struct Face { std::wstring family; float k; bool bold; };   // k = fator de tamanho (as alternativas tem larguras diferentes), bold = forcar negrito
+const std::set<std::wstring>& installed_families() {
+    static std::set<std::wstring> s;
+    static bool done = false;
+    if (!done) {
+        done = true;
+        InstalledFontCollection ic;
+        const int n = ic.GetFamilyCount();
+        if (n > 0) {
+            std::vector<FontFamily> fams((size_t)n);
+            int found = 0;
+            if (ic.GetFamilies(n, fams.data(), &found) == Ok)
+                for (int i = 0; i < found; i++) { WCHAR nm[LF_FACESIZE]; fams[(size_t)i].GetFamilyName(nm); s.insert(nm); }
+        }
+        if (const char* hide = std::getenv("WDC_SETUP_HIDE_FONTS")) {   // teste: finge que as fontes listadas (separadas por ';') nao estao instaladas
+            std::string h = hide;
+            size_t p = 0;
+            while (p <= h.size()) {
+                size_t q = h.find(';', p);
+                if (q == std::string::npos) q = h.size();
+                s.erase(std::wstring(h.begin() + (long)p, h.begin() + (long)q));
+                p = q + 1;
+            }
+        }
+    }
+    return s;
+}
+const Face& face_for(const wchar_t* want) {
+    static std::map<std::wstring, Face> cache;
+    auto it = cache.find(want);
+    if (it != cache.end()) return it->second;
+    struct Cand { const wchar_t* fam; float k; bool bold; };
+    static const Cand impact[] = {{L"Impact", 1.f, false}, {L"Arial Black", 0.72f, false}, {L"Segoe UI Black", 0.78f, false}, {L"Segoe UI", 0.80f, true}, {L"Arial", 0.78f, true}, {L"Tahoma", 0.78f, true}};
+    static const Cand body[] = {{L"Segoe UI", 1.f, false}, {L"Tahoma", 0.97f, false}, {L"Arial", 0.95f, false}, {L"Verdana", 0.88f, false}, {L"Microsoft Sans Serif", 1.f, false}};
+    const bool is_impact = std::wcscmp(want, L"Impact") == 0;
+    const Cand* c = is_impact ? impact : body;
+    const size_t n = is_impact ? sizeof impact / sizeof impact[0] : sizeof body / sizeof body[0];
+    const auto& inst = installed_families();
+    Face f{want, 1.f, false};
+    bool found = false;
+    for (size_t i = 0; i < n; i++)
+        if (inst.count(c[i].fam)) { f = {c[i].fam, c[i].k, c[i].bold}; found = true; break; }
+    if (!found && !inst.empty()) f = {L"", 1.f, false};   // nenhuma da lista: FontFamily::GenericSansSerif no text()
+    std::printf("[setup] fonte \"%ls\" -> \"%ls\"%s\n", want, found ? f.family.c_str() : L"(sans-serif generica)", found && f.family != want ? " (alternativa)" : "");
+    return cache.emplace(want, f).first->second;
+}
+
+// ---- DPI e tela: o setup acompanha o DPI do monitor onde esta (por monitor, WM_DPICHANGED) e encolhe para caber na area util (notebooks 1366x768, escalas de 125% a 200%) ----
+using GetDpiForMonitor_t = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+UINT monitor_dpi(HMONITOR hm) {
+    UINT dx = 96, dy = 96;
+    if (HMODULE sh = LoadLibraryW(L"shcore.dll")) {
+        if (auto f = (GetDpiForMonitor_t)GetProcAddress(sh, "GetDpiForMonitor")) { if (FAILED(f(hm, 0 /*MDT_EFFECTIVE_DPI*/, &dx, &dy))) dx = 96; }
+        else { HDC dc = GetDC(nullptr); dx = (UINT)GetDeviceCaps(dc, LOGPIXELSX); ReleaseDC(nullptr, dc); }
+        FreeLibrary(sh);
+    } else {
+        HDC dc = GetDC(nullptr);
+        dx = (UINT)GetDeviceCaps(dc, LOGPIXELSX);
+        ReleaseDC(nullptr, dc);
+    }
+    return dx ? dx : 96;
+}
+// tamanho da janela (com a moldura) para a escala s no DPI dado
+void frame_size(float s, UINT dpi, int* ww, int* wh) {
+    RECT r{0, 0, (LONG)(kW * s + 0.5f), (LONG)(kH * s + 0.5f)};
+    using AdjustWindowRectExForDpi_t = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    static auto adj = (AdjustWindowRectExForDpi_t)GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi");
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    if (adj) adj(&r, style, FALSE, 0, dpi); else AdjustWindowRect(&r, style, FALSE);
+    *ww = r.right - r.left;
+    *wh = r.bottom - r.top;
+}
+// escala final = DPI do monitor, reduzida para a janela caber na area util (com folga de 16 px); WDC_SETUP_DPI / WDC_SETUP_WORK (ex.: 144, 1366x728) simulam outro PC nos testes
+float fit_scale(UINT dpi, const RECT& work) {
+    if (const char* e = std::getenv("WDC_SETUP_DPI")) { const int v = std::atoi(e); if (v >= 48 && v <= 480) dpi = (UINT)v; }
+    LONG ww_avail = work.right - work.left, wh_avail = work.bottom - work.top;
+    if (const char* e = std::getenv("WDC_SETUP_WORK")) { int a = 0, b = 0; if (std::sscanf(e, "%dx%d", &a, &b) == 2 && a > 200 && b > 200) { ww_avail = a; wh_avail = b; } }
+    float s = (float)dpi / 96.0f;
+    for (int it = 0; it < 4; it++) {
+        int ww, wh;
+        frame_size(s, dpi, &ww, &wh);
+        const float fx = (float)(ww_avail - 16) / (float)ww, fy = (float)(wh_avail - 16) / (float)wh;
+        const float f = std::min(fx, fy);
+        if (f >= 1.0f) break;
+        s *= f;
+    }
+    return std::max(0.45f, s);
+}
+HMONITOR target_monitor(HWND h) {
+    if (h) return MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+    POINT p{0, 0};
+    GetCursorPos(&p);
+    return MonitorFromPoint(p, MONITOR_DEFAULTTOPRIMARY);
+}
+void dpi_awareness_init() {   // por monitor (Windows 10 1703+), com alternativas para versoes mais antigas
+    using SetCtx_t = BOOL(WINAPI*)(HANDLE);
+    if (auto f = (SetCtx_t)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext")) { if (f((HANDLE)-4 /*PER_MONITOR_AWARE_V2*/)) return; }
+    using SetAw_t = HRESULT(WINAPI*)(int);
+    if (HMODULE sh = LoadLibraryW(L"shcore.dll")) {
+        auto f = (SetAw_t)GetProcAddress(sh, "SetProcessDpiAwareness");
+        const bool ok = f && SUCCEEDED(f(2 /*PROCESS_PER_MONITOR_DPI_AWARE*/));
+        if (ok) return;   // a DLL fica carregada de proposito
+        FreeLibrary(sh);
+    }
+    SetProcessDPIAware();
+}
+
 void rounded(GraphicsPath& p, RectF r, float rad) {
     const float d = rad * 2;
     p.AddArc(r.X, r.Y, d, d, 180, 90);
@@ -107,8 +218,10 @@ void rounded(GraphicsPath& p, RectF r, float rad) {
 }
 
 void text(Graphics& gr, const wchar_t* t, const wchar_t* family, float size_px, FontStyle style, const Color& c, float x, float y, float w = 0, StringAlignment al = StringAlignmentNear) {
-    FontFamily ff(family);
-    Font f(&ff, size_px, style, UnitPixel);
+    const Face& fc = face_for(family);
+    FontFamily own(fc.family.empty() ? L"Arial" : fc.family.c_str());
+    const FontFamily* ffp = fc.family.empty() ? FontFamily::GenericSansSerif() : &own;
+    Font f(ffp, size_px * fc.k, fc.bold ? (FontStyle)(style | FontStyleBold) : style, UnitPixel);
     SolidBrush b(c);
     StringFormat sf;
     sf.SetAlignment(al);
@@ -236,7 +349,8 @@ void paint_main(Graphics& gr) {
          L"Em corrida: RT acelera, LT freia, Y troca a visão.", L"X/□ desce marcha, A/✕ sobe marcha. Menus = clássico.");
     button(gr, IdPlay, RectF(x0, S(kH - 78), w * 0.62f, S(48)), L"JOGAR", true);
     button(gr, IdQuit, RectF(x0 + w * 0.62f + S(14), S(kH - 78), w * 0.38f - S(14), S(48)), L"Sair", false);
-    text(gr, L"Enter joga  •  Esc sai  •  1 a 4 escolhem  •  vale na próxima partida", L"Segoe UI", S(11), FontStyleRegular, kMuted, x0, S(kH - 22));
+    text(gr, L"Enter joga  •  Esc sai  •  1 a 4 escolhem", L"Segoe UI", S(11), FontStyleRegular, kMuted, x0, S(kH - 22));
+    pill(gr, IdLogs, RectF(x0 + w - S(190), S(kH - 28), S(190), S(22)), L"ABRIR PASTA DE LOGS  [L]");
 }
 
 // ============================ pagina de imagem ============================
@@ -596,6 +710,7 @@ void click(int id) {
     case IdCtl0: g.sel_ctl = 0; break;
     case IdCtl1: g.sel_ctl = 1; break;
     case IdShortcut: g.shortcut_state = create_desktop_shortcut() ? 1 : 2; break;
+    case IdLogs: wdc_logs_open_folder(); return;
     case IdImagePage: go_page(Page::Image); return;
     case IdCustomPage: go_page(Page::Controls); return;
     case IdBack: if (g.page == Page::Wizard) { wiz_stop(); g.page = Page::Controls; redraw(); return; } go_page(Page::Main); return;
@@ -653,6 +768,7 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             else if (w >= VK_NUMPAD1 && w <= VK_NUMPAD4) click((int)(w - VK_NUMPAD1));
             else if (w == 'I') go_page(Page::Image);
             else if (w == 'P') go_page(Page::Controls);
+            else if (w == 'L') click(IdLogs);
         } else {
             if (w == VK_RETURN || w == VK_ESCAPE || w == VK_BACK) go_page(Page::Main);
             else if (g.page == Page::Controls && (w == '1' || w == VK_NUMPAD1)) click(IdTab0);
@@ -660,6 +776,24 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             else if (g.page == Page::Controls && w == 'M') click(IdWizard);
         }
         return 0;
+    case WM_DPICHANGED: {   // arrastou a janela para um monitor com outro DPI: reescala e redimensiona (encolhendo se nao couber)
+        const UINT dpi = HIWORD(w);
+        MONITORINFO mi{sizeof mi};
+        const RECT* sug = (const RECT*)l;
+        HMONITOR hm = MonitorFromRect(sug, MONITOR_DEFAULTTONEAREST);
+        if (!GetMonitorInfoW(hm, &mi)) return 0;
+        g.s = fit_scale(dpi, mi.rcWork);
+        int ww, wh;
+        frame_size(g.s, dpi, &ww, &wh);
+        int x = sug->left, y = sug->top;
+        if (x + ww > mi.rcWork.right) x = mi.rcWork.right - ww;
+        if (y + wh > mi.rcWork.bottom) y = mi.rcWork.bottom - wh;
+        x = std::max<int>(x, mi.rcWork.left);
+        y = std::max<int>(y, mi.rcWork.top);
+        SetWindowPos(h, nullptr, x, y, ww, wh, SWP_NOZORDER | SWP_NOACTIVATE);
+        redraw();
+        return 0;
+    }
     case WM_CLOSE: finish(false); return 0;
     case WM_DESTROY: KillTimer(h, 1); KillTimer(h, 2); PostQuitMessage(0); return 0;
     }
@@ -721,16 +855,17 @@ void save_all(const std::filesystem::path& dir) {
 }  // namespace
 
 bool wdc_setup_run(const std::filesystem::path& config_dir, const char* shot_path) {
-    SetProcessDPIAware();
+    dpi_awareness_init();
     g = Setup{};
     g.config_dir = config_dir;
     GdiplusStartupInput in;
     if (GdiplusStartup(&g.gdip, &in, nullptr) != Ok) return true;   // sem GDI+: segue sem setup
-    {   // dpi
-        HDC sdc = GetDC(nullptr);
-        g.s = (float)GetDeviceCaps(sdc, LOGPIXELSX) / 96.0f;
-        ReleaseDC(nullptr, sdc);
-    }
+    HMONITOR mon = target_monitor(nullptr);
+    MONITORINFO mi{sizeof mi};
+    GetMonitorInfoW(mon, &mi);
+    const UINT mdpi = monitor_dpi(mon);
+    g.s = fit_scale(mdpi, mi.rcWork);   // DPI do monitor, reduzido se a janela nao couber na area util
+    std::printf("[setup] DPI do monitor %u (%u%%), area util %ldx%ld: escala do setup %.2f\n", mdpi, mdpi * 100 / 96, mi.rcWork.right - mi.rcWork.left, mi.rcWork.bottom - mi.rcWork.top, g.s);
     const WdcConfig& c = wdc_cfg();
     g.sel_mode = c.enhanced ? 1 : 0;
     g.sel_ctl = c.controls == WdcControls::Modern ? 1 : 0;
@@ -762,10 +897,10 @@ bool wdc_setup_run(const std::filesystem::path& config_dir, const char* shot_pat
     wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     wc.lpszClassName = L"WdcSetupWindow";
     RegisterClassW(&wc);
-    RECT r{0, 0, (LONG)S(kW), (LONG)S(kH)};
-    AdjustWindowRect(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE);
-    const int ww = r.right - r.left, wh = r.bottom - r.top;
-    const int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
+    int ww, wh;
+    frame_size(g.s, mdpi, &ww, &wh);
+    const int sx = mi.rcWork.left + std::max<int>(0, ((mi.rcWork.right - mi.rcWork.left) - ww) / 2);
+    const int sy = mi.rcWork.top + std::max<int>(0, ((mi.rcWork.bottom - mi.rcWork.top) - wh) / 2);
     g.hwnd = CreateWindowExW(0, wc.lpszClassName, L"World Driver Championship - Setup", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, sx, sy, ww, wh,
                              nullptr, nullptr, wc.hInstance, nullptr);
     if (!g.hwnd) return true;

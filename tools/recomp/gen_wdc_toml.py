@@ -102,6 +102,13 @@ ENH_HOOKS = [
     ("func_8002C500", 0x8002C584, 0x3C108008, "if (g_wdc_enh_fps60) { int32_t wdc_n = (MEM_W(-0X206C, S32(0X8008 << 16)) == 2) ? 1 : 0; MEM_W(-0X1E4, S32(0X8008 << 16)) = wdc_n; MEM_W(-0X20C, S32(0X8008 << 16)) = 0xBEBC2 * (wdc_n + 1); }"),
     ("func_80003DA4", 0x80003DA4, 0x27BDFFD0, "if (g_wdc_enh_fps60 && wdc_demo_pre(rdram, ctx, 0)) return;"),
     ("func_80003DA4", 0x80003E6C, 0x03E00008, "if (g_wdc_enh_fps60) wdc_demo_post(rdram, ctx, 0);"),
+    # AUDIO a 30 Hz (verificado: com a mesma rota, a musica de vitoria era trocada aos 16,8 s no Enhanced contra 33,4 s no Legacy). O jogo mede o audio em QUADROS, nao em segundos:
+    #  - func_80048508 = maquina de estados da musica, chamada uma vez por quadro por func_8000C560: contadores de 932/1021/991/71 quadros trocam a musica, a volta cai pela metade a 60 Hz;
+    #  - func_80042FA8 = "bomba" de audio (mistura em passos de um tick do sequenciador a partir da posicao da AI), chamada uma vez por quadro por func_80024FCC; libera os buffers de DMA
+    #    de amostras que nao foram usados em 3 chamadas SEGUIDAS. A 60 Hz, chamadas sem nenhum tick completo liberavam buffers ainda em uso (som errado, "Insufficient Free Buffers").
+    # Os dois so rodam em chamadas alternadas quando o jogo esta a 60 Hz (wdc_audio_gate em wdc_audio.cpp): a cadencia volta a ser a original de 30 Hz.
+    ("func_80048508", 0x80048508, 0x27BDFFD8, "if (g_wdc_enh_fps60 && wdc_audio_gate(1)) return;"),
+    ("func_80042FA8", 0x80042FA8, 0x27BDFFE0, "if (g_wdc_enh_fps60 && wdc_audio_gate(0)) return;"),
 ]
 
 # Sondas de diagnostico (SO na build --trace): [[patches.hook]] que chamam wdc_probe_poly()/wdc_exp() de recomp/project/src/trace_hooks.cpp.

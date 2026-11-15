@@ -24,6 +24,8 @@ void wdc_hook_osViSetEvent(uint8_t* rdram, recomp_context* ctx);
 // Modo Enhanced: chaves (preenchidas por main.cpp a partir de wdc_config) que os hooks condicionais do C gerado consultam. Legacy = tudo 0 = codigo original.
 extern int g_wdc_enh_fps60;
 extern int g_wdc_skip_recv;
+// Audio a 30 Hz no Enhanced (gen_wdc_toml.py, ENH_HOOKS): devolve 1 quando esta chamada deve ser pulada (id 0 = bomba de audio, 1 = estados da musica).
+int wdc_audio_gate(int id);
 // Demo/replay a 60 Hz (Enhanced): amostras de entrada a 30 Hz (pre: devolve 1 nas iteracoes que so mantem a amostra; post: guarda o resultado).
 int wdc_demo_pre(uint8_t* rdram, recomp_context* ctx, int play);
 void wdc_demo_post(uint8_t* rdram, recomp_context* ctx, int play);

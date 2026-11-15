@@ -16,6 +16,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -96,8 +99,54 @@ std::string shot_name() {          // 1a captura: caminho como pedido; as seguin
 
 std::atomic<uint64_t> g_cmds{0}, g_syncs{0}, g_frames{0}, g_scanouts{0};
 double g_sync_wait_total = 0.0, g_sync_wait_max = 0.0;
+// Travadas (diagnostico para o log): histograma do intervalo entre quadros (SYNC_FULL a SYNC_FULL) e das CPU-ms gastas por quadro so enfileirando comandos (inclui compilacao de pipelines).
+// Faixas de intervalo em ms: <20, 20-30, 30-40, 40-60, 60-100, 100-200, >=200.
+uint64_t g_gap_hist[7] = {0, 0, 0, 0, 0, 0, 0};
+uint64_t g_slow_cpu_frames = 0;
+double g_cpu_ms_max = 0.0;
 uint32_t g_vi_latest[14] = {};
 uint8_t* g_rdram_ptr = nullptr;
+// Cache de pipelines do Vulkan em disco (%LOCALAPPDATA%/WorldDriverChampionship/cache, um arquivo por placa): as proximas execucoes nao recompilam os shaders do RDP que ja foram usados
+// (compilar um shader novo no meio da corrida e uma causa classica de travadas raras). O arquivo e validado pelo UUID do driver e por um hash; se nao servir, o Vulkan cria um cache novo.
+std::filesystem::path pipeline_cache_file() {
+    const char* la = std::getenv("LOCALAPPDATA");
+    if (!la || !*la || !g_dev) return {};
+    const auto& pr = g_dev->get_gpu_properties();
+    char n[64];
+    std::snprintf(n, sizeof n, "pipeline_cache_%04x_%04x.bin", (unsigned)pr.vendorID, (unsigned)pr.deviceID);
+    return std::filesystem::path(la) / "WorldDriverChampionship" / "cache" / n;
+}
+void load_pipeline_cache() {
+    const auto p = pipeline_cache_file();
+    if (p.empty()) return;
+    std::ifstream f(p, std::ios::binary);
+    if (!f) {   // primeira execucao: cria o cache vazio (sem ele o Vulkan nao guarda nada e nao ha o que gravar)
+        std::printf("[rdp-vk] cache de pipelines: sem arquivo anterior (%s); criando um novo\n", p.string().c_str());
+        g_dev->init_pipeline_cache(nullptr, 0);
+        return;
+    }
+    std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (g_dev->init_pipeline_cache(d.data(), d.size())) std::printf("[rdp-vk] cache de pipelines carregado: %zu KB\n", d.size() / 1024);
+}
+void save_pipeline_cache() {
+    const auto p = pipeline_cache_file();
+    if (p.empty()) return;
+    const size_t sz = g_dev->get_pipeline_cache_size();
+    if (!sz) return;
+    std::vector<uint8_t> d(sz);
+    if (!g_dev->get_pipeline_cache_data(d.data(), d.size())) return;
+    std::error_code ec;
+    std::filesystem::create_directories(p.parent_path(), ec);
+    const auto tmp = std::filesystem::path(p).concat(".tmp");
+    {
+        std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+        if (!o) return;
+        o.write((const char*)d.data(), (std::streamsize)d.size());
+    }
+    std::filesystem::rename(tmp, p, ec);
+    std::printf("[rdp-vk] cache de pipelines gravado: %zu KB\n", d.size() / 1024);
+}
+inline uint32_t rdram_word(uint32_t phys) { return g_rdram_ptr ? *(const volatile uint32_t*)(g_rdram_ptr + phys) : 0u; }
 bool g_have_vi = false;
 
 void write_png(const char* path, const std::vector<RDP::RGBA>& px, unsigned w, unsigned h) {
@@ -370,6 +419,7 @@ void thread_main() {
             continue;
         }
         if (j.kind == Job::Cmds) {
+            const auto tj0 = std::chrono::steady_clock::now();
             if (g_gate_on.load()) gate_wait(j);
             size_t i = 0;
             while (i < j.words.size()) {
@@ -430,22 +480,30 @@ void thread_main() {
                 g_proc->enqueue_command(n, w);
                 g_cmds++;
                 if (((w[0] >> 24) & 0x3F) == 0x29) {   // SYNC_FULL: esperar a GPU e so entao avisar o jogo
+                    const double cpu_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tj0).count();   // CPU so enfileirando os comandos deste quadro
+                    if (cpu_ms > g_cpu_ms_max) g_cpu_ms_max = cpu_ms;
                     const double t0 = wdc_now_s();
                     g_proc->wait_for_timeline(g_proc->signal_timeline());
                     const double dt = wdc_now_s() - t0;
                     g_sync_wait_total += dt;
                     if (dt > g_sync_wait_max) g_sync_wait_max = dt;
                     g_syncs++;
+                    if (g_syncs.load() == 6000) save_pipeline_cache();   // uma vez no meio da sessao, para nao perder se o programa for encerrado a forca
                     {   // diagnostico de TRAVADAS: intervalo longo entre dois quadros (SYNC_FULL) fica registrado com o que se sabe na hora
                         static double last_sync_t = 0.0;
                         static int hitch_lines = 0;
                         const double now = wdc_now_s();
-                        if (last_sync_t > 0.0 && g_syncs.load() > 300 && now - last_sync_t > 0.12 && hitch_lines < 60) {
-                            hitch_lines++;
-                            size_t ql = 0;
-                            { std::lock_guard<std::mutex> lk(g_mutex); ql = g_queue.size(); }
-                            std::printf("[hitch %7.2fs] %.0f ms entre dois quadros (espera da GPU neste quadro: %.0f ms; fila do RDP: %zu; janela em primeiro plano: %s)\n", now,
-                                        (now - last_sync_t) * 1000.0, dt * 1000.0, ql, wdc_window_foreground() ? "sim" : "NAO");
+                        if (last_sync_t > 0.0 && g_syncs.load() > 300) {
+                            const double gap = (now - last_sync_t) * 1000.0;
+                            g_gap_hist[gap < 20 ? 0 : gap < 30 ? 1 : gap < 40 ? 2 : gap < 60 ? 3 : gap < 100 ? 4 : gap < 200 ? 5 : 6]++;
+                            if (cpu_ms > 20.0) g_slow_cpu_frames++;
+                            if ((gap > 60.0 || cpu_ms > 30.0) && hitch_lines < 120) {   // quadro longo (> 60 ms entre quadros) ou CPU do RDP lenta (> 30 ms so enfileirando)
+                                hitch_lines++;
+                                size_t ql = 0;
+                                { std::lock_guard<std::mutex> lk(g_mutex); ql = g_queue.size(); }
+                                std::printf("[hitch %7.2fs] %.0f ms entre dois quadros (CPU do RDP neste quadro: %.0f ms; espera da GPU: %.0f ms; fila do RDP: %zu; estado do jogo: %u; corrida: %u; janela em primeiro plano: %s)\n", now,
+                                            gap, cpu_ms, dt * 1000.0, ql, rdram_word(0x923E4), rdram_word(0x7DF94), wdc_window_foreground() ? "sim" : "NAO");
+                            }
                         }
                         last_sync_t = now;
                     }
@@ -492,6 +550,7 @@ bool wdc_rdp_vk_init(uint8_t* rdram, size_t rdram_size, int gpu_index) {
     if (!g_ctx->init_device(gpus[pick], VK_NULL_HANDLE, nullptr, 0, 0)) { std::printf("[rdp-vk] falha ao criar dispositivo Vulkan\n"); return false; }
     g_dev.reset(new Vulkan::Device);
     g_dev->set_context(*g_ctx);
+    load_pipeline_cache();
     // Resolucao interna (modo Enhanced: enhanced.internal_scale = 1|2|4|8; Legacy = 1; WDC_RDP_SCALE sobrescreve, ver wdc_config.cpp): upscaling do ParaLLEl-RDP.
     // Experimental: o jogo le o framebuffer de volta em alguns efeitos? (WDC_RDP_SSREADBACK liga a leitura super-amostrada.)
     RDP::CommandProcessorFlags rdp_flags = 0;
@@ -596,11 +655,15 @@ bool wdc_rdp_vk_shot_done() { return g_shot_done.load(); }
 
 void wdc_rdp_vk_print_stats() {
     if (!g_active.load()) return;
+    save_pipeline_cache();
     std::printf("[rdp-vk] barreira de VI: %llu esperas, %llu estouros de 20 ms%s\n", (unsigned long long)g_barrier_waits.load(), (unsigned long long)g_barrier_timeouts.load(), g_vi_barrier_off ? " (DESLIGADA)" : "");
     if (g_deglitch) std::printf("[rdp-vk] quadros intrusos filtrados (reexibido o anterior): %llu\n", (unsigned long long)g_deglitched.load());
     if (g_gate_on.load()) std::printf("[rdp-vk] portao de buffer: %llu lotes retidos, %llu scanouts adiantados, %llu estouros de 30 ms\n", (unsigned long long)g_gate_holds.load(), (unsigned long long)g_gate_reorders.load(), (unsigned long long)g_gate_timeouts.load());
     if (g_flick_dir) std::printf("[flicker] quadros analisados: %llu; com salto > %.1f em relacao ao anterior: %llu; QUADROS INTRUSOS (A,X,A'): %llu; DOIS quadros (A,X,Y,B): %llu\n",
                                  (unsigned long long)g_flick_frames, g_flick_T, (unsigned long long)g_flick_big, (unsigned long long)g_flick_found, (unsigned long long)g_flick_found2);
+    std::printf("[rdp-vk] intervalo entre quadros (ms): <20=%llu 20-30=%llu 30-40=%llu 40-60=%llu 60-100=%llu 100-200=%llu >=200=%llu; quadros com > 20 ms de CPU so enfileirando: %llu (maximo %.1f ms)\n",
+                (unsigned long long)g_gap_hist[0], (unsigned long long)g_gap_hist[1], (unsigned long long)g_gap_hist[2], (unsigned long long)g_gap_hist[3], (unsigned long long)g_gap_hist[4],
+                (unsigned long long)g_gap_hist[5], (unsigned long long)g_gap_hist[6], (unsigned long long)g_slow_cpu_frames, g_cpu_ms_max);
     std::printf("[rdp-vk] comandos enviados a GPU: %llu; SYNC_FULL: %llu (espera media %.2f ms, maxima %.2f ms); quadros: %llu; scanouts: %llu\n",
                 (unsigned long long)g_cmds.load(), (unsigned long long)g_syncs.load(),
                 g_syncs.load() ? 1000.0 * g_sync_wait_total / (double)g_syncs.load() : 0.0, 1000.0 * g_sync_wait_max,

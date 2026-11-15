@@ -46,6 +46,7 @@
 #include "wdc_rom.h"
 #include "wdc_saves.h"
 #include "wdc_joy.h"
+#include "wdc_logs.h"
 #include "wdc_version.h"
 #include "wdc_input.h"
 #include "wdc_window.h"
@@ -71,12 +72,14 @@ static std::string g_dump_every_dir; static double g_dump_every_t = -1.0, g_dump
 static std::string g_dump_ram_path; static double g_dump_ram_t = -1.0;   // --dump-ram arquivo segundos: grava a RDRAM (4 MB, palavras em ordem do host) no instante dado
 static bool g_exit_after_script = false;   // --exit-after-script: encerra 3 s (relogio ativo) depois do fim do ultimo evento nao periodico do roteiro
 static double g_script_end = 0.0;
+static bool g_vi_clock = false;     // --vi-clock: como --task-clock, mas conta retracos do VI (60/s): a mesma rota vale no Legacy e no Enhanced (o Enhanced emite ~60 tarefas/s, o Legacy 30/s)
 static bool g_task_clock = false;   // --task-clock: roteiro, janelas de gravacao e capturas contam TAREFAS graficas (30/s) em vez de relogio de parede (reprodutivel sob carga)
 static const Clock::time_point g_t0 = Clock::now();
 
 static double now_s() { return std::chrono::duration<double>(Clock::now() - g_t0).count(); }
 extern "C" uint64_t wdc_gfx_tasks();   // wdc_rsp_hw.cpp
-double wdc_now_s() { return g_task_clock ? (double)std::max<uint64_t>(g_task_count.load(), wdc_gfx_tasks()) / 30.0 : now_s(); }   // usado por trace_hooks.cpp, trace_seg.cpp, wdc_rdp_vk.cpp e pelo roteiro de entrada
+extern "C" uint64_t wdc_vi_ticks_c();
+double wdc_now_s() { if (g_vi_clock) return (double)wdc_vi_ticks_c() / 60.0; return g_task_clock ? (double)std::max<uint64_t>(g_task_count.load(), wdc_gfx_tasks()) / 30.0 : now_s(); }   // usado por trace_hooks.cpp, trace_seg.cpp, wdc_rdp_vk.cpp e pelo roteiro de entrada
 static uint8_t* g_rdram = nullptr;
 static fs::path g_config_dir;
 extern "C" int g_wdc_enh_fps60;   // wdc_runtime_stubs.cpp: chave do modo Enhanced (60 fps)
@@ -465,7 +468,8 @@ static RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
 }
 static void message_box(const char* msg) { std::fprintf(stderr, "[wdc] %s\n", msg); }
 static void vi_callback() { g_vi_count++; }
-uint64_t wdc_vi_ticks() { return g_vi_count.load(); }                 // ticks de VI vistos pela thread de VI (incrementado no FIM de cada tick)
+uint64_t wdc_vi_ticks() { return g_vi_count.load(); }
+extern "C" uint64_t wdc_vi_ticks_c() { return g_vi_count.load(); }                 // ticks de VI vistos pela thread de VI (incrementado no FIM de cada tick)
 uint64_t wdc_vi_updates_done() { return g_updates_done.load(); }      // quantos desses ticks ja viraram um Vi job na fila do RDP
 static void* create_gfx() { return nullptr; }
 static ultramodern::renderer::WindowHandle create_window(void*) {
@@ -671,6 +675,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--play")) g_play = true;      // modo interativo: janela, teclado e controle; roda ate fechar (Esc)
         else if (!std::strcmp(argv[i], "--autopress")) g_autopress = true;
         else if (!std::strcmp(argv[i], "--task-clock")) g_task_clock = true;
+        else if (!std::strcmp(argv[i], "--vi-clock")) { g_task_clock = true; g_vi_clock = true; }
         else if (!std::strcmp(argv[i], "--players") && i + 1 < argc) g_players = std::max(1, std::min(4, std::atoi(argv[++i])));
         else if (!std::strcmp(argv[i], "--exit-after-script")) g_exit_after_script = true;
         else if (!std::strcmp(argv[i], "--no-rdp-vk")) g_rdp_vk = false;
@@ -709,14 +714,17 @@ int main(int argc, char** argv) {
     }
     fs::create_directories(config_dir);
     g_config_dir = config_dir;
+    fs::path log_file;
 #ifdef WDC_RELEASE_BUILD
-    if (!console_attached) {   // clique duplo (sem terminal): registra a execucao em <config>/wdc_log.txt (a ultima)
-        const std::string lp = (config_dir / "wdc_log.txt").string();
-        if (std::freopen(lp.c_str(), "w", stdout)) _dup2(_fileno(stdout), _fileno(stderr));
-        std::setvbuf(stdout, nullptr, _IONBF, 0);
-        std::setvbuf(stderr, nullptr, _IONBF, 0);
-    }
+    if (!console_attached) log_file = wdc_logs_start(config_dir);   // clique duplo (sem terminal): %LOCALAPPDATA%/WorldDriverChampionship/logs/wdc_log_AAAAMMDD-HHMMSS.txt (os 10 mais recentes)
 #endif
+    wdc_logs_system_info(exe_dir, config_dir);                  // cabecalho do sistema no log (Windows, CPU, memoria, GPUs, monitores, audio): serve para comparar PCs
+    if (!log_file.empty()) std::printf("[main] log desta execucao: %s\n", log_file.string().c_str());
+    {   // linha de comando (sem a ROM)
+        std::string cl;
+        for (int i = 1; i < argc; i++) { cl += argv[i]; cl += ' '; }
+        std::printf("[main] argumentos: %s\n", cl.empty() ? "(nenhum)" : cl.c_str());
+    }
     wdc_cfg_load(config_dir);                                   // modo Legacy/Enhanced e opcoes (CLI > wdc_config.toml > padrao do modo)
     g_wdc_enh_fps60 = wdc_cfg().fps60 ? 1 : 0;                  // os hooks condicionais do C gerado (gen_wdc_toml.py, ENH_HOOKS) leem isto
     wdc_input_configure(wdc_cfg());                             // esquema de botoes do XInput (classico ou moderno) e botoes personalizados

@@ -66,11 +66,85 @@ inline void frame_at(const Desc& d, uint32_t k, float& L, float& R, int& li, int
     R = (float)ri;
 }
 
+// ---- reamostragem de alta qualidade (taxa do jogo -> taxa do dispositivo) ----
+// Interpolador polifasico de sinc com janela de Kaiser (32 pontos, 1024 fases, corte em 0,46 da taxa do jogo): a interpolacao linear usada antes deixava
+// "imagens" espectrais e atenuava os agudos, o que soa como chiado e aspereza em mixagens cheias. O historico guarda copias dos quadros ja tocados
+// (o jogo reescreve o anel logo atras da posicao de reproducao, entao reler a RDRAM para tras daria dados novos).
+constexpr int kTaps = 32, kPhases = 1024;
+std::vector<float> g_poly;          // kPhases * kTaps
+float g_hist_l[kTaps], g_hist_r[kTaps];
+int g_hist_head = 0;                // proximo indice a gravar; o quadro mais recente esta em head-1
+bool g_hq = true;                   // WDC_AUDIO_LINEAR=1 volta para a interpolacao linear (comparacao)
+
+double bessel_i0(double x) {
+    double s = 1.0, t = 1.0;
+    for (int k = 1; k < 40; k++) { t *= (x / (2.0 * k)) * (x / (2.0 * k)); s += t; }
+    return s;
+}
+void build_poly() {
+    g_poly.assign((size_t)kPhases * kTaps, 0.f);
+    const double fc = 0.46, beta = 7.5, half = kTaps / 2.0, pi = 3.14159265358979323846, i0b = bessel_i0(beta);
+    for (int ph = 0; ph < kPhases; ph++) {
+        const double frac = (double)ph / kPhases;
+        double sum = 0.0;
+        double h[kTaps];
+        for (int j = 0; j < kTaps; j++) {
+            const double t = (double)(j - (kTaps / 2 - 1)) - frac;   // posicao do tap em relacao ao ponto de interpolacao (em quadros de origem)
+            const double x = 2.0 * fc * t;
+            const double sinc = std::fabs(x) < 1e-9 ? 1.0 : std::sin(pi * x) / (pi * x);
+            const double r = t / half;
+            const double w = std::fabs(r) >= 1.0 ? 0.0 : bessel_i0(beta * std::sqrt(1.0 - r * r)) / i0b;
+            h[j] = 2.0 * fc * sinc * w;
+            sum += h[j];
+        }
+        for (int j = 0; j < kTaps; j++) g_poly[(size_t)ph * kTaps + j] = (float)(h[j] / sum);   // ganho DC = 1 em cada fase
+    }
+}
+inline void push_hist(float L, float R) {
+    g_hist_l[g_hist_head] = L; g_hist_r[g_hist_head] = R;
+    g_hist_head = (g_hist_head + 1) % kTaps;
+}
+
+// ---- diagnostico: "anel velho" (o jogo nao reescreveu o anel a tempo e a AI tocou dados da volta anterior = som de "ranhura") ----
+// Guarda o quadro lido em cada posicao do anel; uma sequencia de >= 64 quadros nao silenciosos IDENTICOS aos lidos uma volta antes (186 ms) so acontece com dado velho.
+struct StaleDet {
+    std::vector<uint32_t> last;
+    const uint8_t* p = nullptr;
+    uint32_t run = 0, run_start = 0;
+    uint64_t events = 0, frames = 0;
+    double t_first = -1;
+} g_sd;
+uint64_t g_pump_gaps = 0;                    // vezes em que o jogo ficou > 120 ms sem chamar osAiGetStatus (a "bomba" de audio parou)
+double g_pump_gap_max = 0.0, g_pump_last = -1.0;
+uint64_t g_jump_big = 0;                     // avancos da AI > 2048 quadros (93 ms) entre duas leituras de osAiGetLength: acima do limite de mistura do jogo
+uint32_t g_jump_max = 0;
+uint64_t g_len_last_played = 0;
+
+inline void stale_note(int li, int ri) {
+    const uint32_t wd = ((uint32_t)(uint16_t)li << 16) | (uint16_t)ri;
+    if (g_sd.p != g_cur.p || g_sd.last.size() != g_cur.frames) { g_sd.p = g_cur.p; g_sd.last.assign(g_cur.frames, 0u); g_sd.run = 0; }
+    uint32_t& prev = g_sd.last[g_pos];
+    if (wd == prev && (std::abs(li) + std::abs(ri)) > 64) {
+        if (!g_sd.run) g_sd.run_start = g_pos;
+        g_sd.run++;
+    } else {
+        if (g_sd.run >= 64) {
+            g_sd.events++; g_sd.frames += g_sd.run;
+            if (g_sd.t_first < 0) g_sd.t_first = wdc_now_s();
+            if (g_sd.events <= 40) std::printf("[audio %7.2fs] ANEL VELHO: %u quadros (%.0f ms) repetidos da volta anterior (posicao %u)\n", wdc_now_s(), g_sd.run, 1000.0 * g_sd.run / std::max<uint32_t>(1, g_rate.load()), g_sd.run_start);
+        }
+        g_sd.run = 0;
+    }
+    prev = wd;
+}
+
 // Consome um quadro do DMA em curso (WAV e estatisticas); ao fim do DMA o pendente assume. Chamado com g_mu travado.
 void consume_one_locked() {
     float L, R;
     int li, ri;
     frame_at(g_cur, g_pos, L, R, li, ri);
+    push_hist(L, R);
+    stale_note(li, ri);
     g_peak = std::max({g_peak, std::abs(li), std::abs(ri)});
     g_sumsq += (double)li * li + (double)ri * ri;
     if (li || ri) g_nonzero++;
@@ -127,12 +201,33 @@ void render(void* out, uint32_t n, uint32_t dev_rate, uint32_t ch, bool is_float
             float a0, b0, a1, b1;
             int li, ri;
             frame_at(g_cur, g_pos, a0, b0, li, ri);
-            if (g_pos + 1 < g_cur.frames) frame_at(g_cur, g_pos + 1, a1, b1, li, ri);
-            else if (g_pend_valid) frame_at(g_pend, 0, a1, b1, li, ri);
-            else { a1 = a0; b1 = b0; }
-            const float a = (float)g_frac;
-            L = soft_limit((((1.f - a) * a0 + a * a1) / 32768.f) * g_out_gain);
-            R = soft_limit((((1.f - a) * b0 + a * b1) / 32768.f) * g_out_gain);
+            float sl, sr;
+            if (g_hq) {
+                // 32 pontos: n-15..n-1 do historico (copias), n..n+16 do anel (adiante da posicao de reproducao); apos o fim do DMA, segue o pendente ou repete o ultimo quadro
+                const float* h = &g_poly[(size_t)std::min<int>(kPhases - 1, (int)(g_frac * kPhases)) * kTaps];
+                float accl = 0.f, accr = 0.f;
+                for (int j = 0; j < kTaps / 2 - 1; j++) {   // j = 0..14  -> quadros n-15 .. n-1
+                    const int idx = (g_hist_head - (kTaps / 2 - 1) + j + 2 * kTaps) % kTaps;
+                    accl += h[j] * g_hist_l[idx]; accr += h[j] * g_hist_r[idx];
+                }
+                float lastl = a0, lastr = b0;
+                for (int j = kTaps / 2 - 1; j < kTaps; j++) {   // j = 15..31 -> quadros n .. n+16
+                    const uint32_t k = g_pos + (uint32_t)(j - (kTaps / 2 - 1));
+                    float fl, fr; int xl, xr;
+                    if (k < g_cur.frames) { frame_at(g_cur, k, fl, fr, xl, xr); lastl = fl; lastr = fr; }
+                    else if (g_pend_valid && k - g_cur.frames < g_pend.frames) { frame_at(g_pend, k - g_cur.frames, fl, fr, xl, xr); lastl = fl; lastr = fr; }
+                    accl += h[j] * lastl; accr += h[j] * lastr;
+                }
+                sl = accl; sr = accr;
+            } else {
+                if (g_pos + 1 < g_cur.frames) frame_at(g_cur, g_pos + 1, a1, b1, li, ri);
+                else if (g_pend_valid) frame_at(g_pend, 0, a1, b1, li, ri);
+                else { a1 = a0; b1 = b0; }
+                const float a = (float)g_frac;
+                sl = (1.f - a) * a0 + a * a1; sr = (1.f - a) * b0 + a * b1;
+            }
+            L = soft_limit((sl / 32768.f) * g_out_gain);
+            R = soft_limit((sr / 32768.f) * g_out_gain);
             g_frac += step;
             while (g_frac >= 1.0 && g_cur_valid) { g_frac -= 1.0; consume_one_locked(); }
         } else if (g_first_t >= 0) {
@@ -225,6 +320,8 @@ done:
 void wdc_audio_init(const char* wav_path, bool real_output) {
     if (wav_path) g_wav_path = wav_path;
     if (const char* e = std::getenv("WDC_AUDIO_GAIN")) g_out_gain = std::max(0.1f, std::min(1.0f, (float)std::atof(e)));
+    g_hq = std::getenv("WDC_AUDIO_LINEAR") == nullptr;
+    if (g_hq) build_poly();
     g_real = real_output;
     if (real_output) {
         g_dev_thread = std::thread(device_thread);
@@ -267,6 +364,15 @@ extern "C" void wdc_hook_osAiGetStatus(uint8_t*, recomp_context* ctx) {
     std::lock_guard<std::mutex> l(g_mu);
     if (!g_real) null_advance_locked();
     g_status_calls++;
+    {   // a "bomba" de audio do jogo (func_80042FA8) chama isto uma vez por quadro; uma pausa longa = quadro do jogo atrasado = o anel pode esvaziar
+        const double now = wdc_now_s();
+        if (g_pump_last >= 0.0) {
+            const double dt = now - g_pump_last;
+            if (dt > g_pump_gap_max) g_pump_gap_max = dt;
+            if (dt > 0.120) { g_pump_gaps++; if (g_pump_gaps <= 30) std::printf("[audio %7.2fs] bomba de audio do jogo parada por %.0f ms (quadro do jogo atrasado)\n", now, dt * 1000.0); }
+        }
+        g_pump_last = now;
+    }
     uint32_t st = 0;
     if (g_cur_valid) st |= 0x40000000u;
     if (g_cur_valid && g_pend_valid) st |= 0x80000000u;
@@ -277,7 +383,33 @@ extern "C" void wdc_hook_osAiGetStatus(uint8_t*, recomp_context* ctx) {
 extern "C" void wdc_hook_osAiGetLength(uint8_t*, recomp_context* ctx) {
     std::lock_guard<std::mutex> l(g_mu);
     if (!g_real) null_advance_locked();
+    {   // quantos quadros a AI andou desde a leitura anterior (o jogo mistura no maximo 2048 quadros por chamada: mais que isso deixa um buraco de dado velho)
+        const uint64_t adv = g_frames_played - g_len_last_played;
+        g_len_last_played = g_frames_played;
+        if (adv > g_jump_max) g_jump_max = (uint32_t)adv;
+        if (adv > 2048) { g_jump_big++; if (g_jump_big <= 20) std::printf("[audio %7.2fs] a AI andou %llu quadros (%.0f ms) entre duas leituras: acima do limite de mistura do jogo (2048)\n", wdc_now_s(), (unsigned long long)adv, 1000.0 * (double)adv / std::max<uint32_t>(1, g_rate.load())); }
+    }
     ctx->r2 = g_cur_valid ? (gpr)(uint32_t)((g_cur.frames - g_pos) * 4u) : 0;
+}
+
+// Enhanced: a bomba de audio e a maquina de estados da musica contam QUADROS do jogo (ver gen_wdc_toml.py). Com o jogo a 60 Hz (retraco a retraco) pulamos uma chamada em cada duas;
+// se o quadro durou 2 retracos ou mais (30 Hz, demo, travada), executa sempre (cadencia original).
+extern "C" uint64_t wdc_vi_ticks_c();
+static uint64_t g_gate_skipped[2] = {0, 0}, g_gate_calls[2] = {0, 0};
+extern "C" int wdc_audio_gate(int id) {
+    static const bool off = std::getenv("WDC_NO_AUDIO_GATE") != nullptr;   // diagnostico: desliga o 30 Hz do audio (comparacao A/B)
+    if (off) return 0;
+    static uint64_t last_call[2] = {~0ull, ~0ull};
+    static bool skipped_last[2] = {false, false};
+    const uint64_t now = wdc_vi_ticks_c();
+    const uint64_t d = last_call[id] == ~0ull ? 2 : now - last_call[id];
+    last_call[id] = now;
+    g_gate_calls[id]++;
+    if (d >= 2) { skipped_last[id] = false; return 0; }
+    if (skipped_last[id]) { skipped_last[id] = false; return 0; }
+    skipped_last[id] = true;
+    g_gate_skipped[id]++;
+    return 1;
 }
 
 void wdc_audio_shutdown() {
@@ -292,6 +424,11 @@ void wdc_audio_shutdown() {
                 g_frames_played ? std::sqrt(g_sumsq / (2.0 * (double)g_frames_played)) : 0.0, (unsigned long long)g_nonzero, g_real ? "sim" : "nao",
                 (unsigned long long)g_underruns, (unsigned long long)g_dev_starved.load());
     if (g_calls) std::printf("[audio] primeira entrega em %.2fs, ultima em %.2fs\n", g_first_t, g_last_t);
+    std::printf("[audio] audio a 30 Hz no Enhanced: bomba %llu de %llu chamadas puladas, musica %llu de %llu\n", (unsigned long long)g_gate_skipped[0], (unsigned long long)g_gate_calls[0],
+                (unsigned long long)g_gate_skipped[1], (unsigned long long)g_gate_calls[1]);
+    std::printf("[audio] diagnostico: anel velho %llu ocorrencias (%llu quadros); bomba parada > 120 ms: %llu vezes (maior pausa %.0f ms); avanco da AI maior que 2048 quadros: %llu vezes (maior avanco %u quadros); reamostragem: %s\n",
+                (unsigned long long)g_sd.events, (unsigned long long)g_sd.frames, (unsigned long long)g_pump_gaps, g_pump_gap_max * 1000.0, (unsigned long long)g_jump_big, g_jump_max,
+                g_hq ? "sinc 32 pontos" : "linear");
     if (!g_wav_path.empty()) {
         write_wav(g_wav_path, g_wav, g_rate.load());
         std::printf("[audio] WAV gravado em %s (%zu quadros, %u Hz)\n", g_wav_path.c_str(), g_wav.size() / 2, (unsigned)g_rate.load());

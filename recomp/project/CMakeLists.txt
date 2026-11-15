@@ -99,6 +99,7 @@ add_executable(wdc_recomp
     src/wdc_rom.cpp
     src/wdc_saves.cpp
     src/wdc_joy.cpp
+    src/wdc_logs.cpp
     src/wdc.rc
     "${WDC_ROOT}/recomp/rsp/RecompiledUcode/wdc_ucode.cpp"   # ucode grafico recompilado (RSPRecomp patchado; ver recomp/rsp/wdc_ucode.toml)
     "${WDC_ROOT}/recomp/runtime_glue/wdc_runtime_stubs.cpp"

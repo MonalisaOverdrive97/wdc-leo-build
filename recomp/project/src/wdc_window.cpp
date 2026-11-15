@@ -3,6 +3,7 @@
 #include "wdc_config.h"
 #include "wdc_present.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -143,18 +144,48 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
-void window_thread(std::string title, int cw, int ch, std::promise<bool> ready) {
+// DPI por monitor (Windows 10 1703+), com alternativas para versoes mais antigas (o setup faz o mesmo; a primeira chamada vale).
+void dpi_awareness_init() {
+    using SetCtx_t = BOOL(WINAPI*)(HANDLE);
+    if (auto f = (SetCtx_t)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext")) { if (f((HANDLE)-4 /*PER_MONITOR_AWARE_V2*/)) return; }
+    using SetAw_t = HRESULT(WINAPI*)(int);
+    if (HMODULE sh = LoadLibraryW(L"shcore.dll")) {
+        auto f = (SetAw_t)GetProcAddress(sh, "SetProcessDpiAwareness");
+        if (f && SUCCEEDED(f(2 /*PROCESS_PER_MONITOR_DPI_AWARE*/))) return;
+        FreeLibrary(sh);
+    }
     SetProcessDPIAware();
+}
+
+void window_thread(std::string title, int cw, int ch, std::promise<bool> ready) {
+    dpi_awareness_init();
     WNDCLASSW wc{};
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     wc.lpszClassName = L"WdcRecompWindow";
     RegisterClassW(&wc);
+    // tamanho inicial: o pedido (cw x ch), reduzido na mesma proporcao se nao couber na area util do monitor onde esta o cursor (notebooks 1366x768, escalas de 125% a 200%), e centralizado
+    POINT cur{0, 0};
+    GetCursorPos(&cur);
+    MONITORINFO mi{sizeof mi};
+    GetMonitorInfoW(MonitorFromPoint(cur, MONITOR_DEFAULTTOPRIMARY), &mi);
+    const int aw = (int)(mi.rcWork.right - mi.rcWork.left) - 16, ah = (int)(mi.rcWork.bottom - mi.rcWork.top) - 16;
     RECT r{0, 0, cw, ch};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    if ((r.right - r.left) > aw || (r.bottom - r.top) > ah) {
+        const int nc_w = (r.right - r.left) - cw, nc_h = (r.bottom - r.top) - ch;
+        const float f = std::min((float)(aw - nc_w) / (float)cw, (float)(ah - nc_h) / (float)ch);
+        if (f > 0.2f && f < 1.0f) { cw = (int)(cw * f); ch = (int)(ch * f); }
+        r = RECT{0, 0, cw, ch};
+        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        std::printf("[window] a janela pedida nao cabe na area util %dx%d: janela de %dx%d\n", aw + 16, ah + 16, cw, ch);
+    }
+    const int ww = r.right - r.left, wh = r.bottom - r.top;
+    const int wx = mi.rcWork.left + std::max<int>(0, ((int)(mi.rcWork.right - mi.rcWork.left) - ww) / 2);
+    const int wy = mi.rcWork.top + std::max<int>(0, ((int)(mi.rcWork.bottom - mi.rcWork.top) - wh) / 2);
     const std::wstring wt(title.begin(), title.end());
-    g_hwnd = CreateWindowExW(0, wc.lpszClassName, wt.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
+    g_hwnd = CreateWindowExW(0, wc.lpszClassName, wt.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, wx, wy, ww, wh,
                              nullptr, nullptr, wc.hInstance, nullptr);
     if (g_hwnd && wdc_cfg().fullscreen) toggle_fullscreen(g_hwnd);   // display.fullscreen: abre em tela cheia (antes de o apresentador criar a swapchain)
     ready.set_value(g_hwnd != nullptr);

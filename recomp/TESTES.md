@@ -190,3 +190,14 @@ Em **corrida ao vivo** (simulação rodando); **nos menus, na pausa e nas telas 
 **P2**: controle desconectado/reconectado durante a corrida volta a responder; vários controles ao mesmo tempo (jogador 2).
 
 **P1 (pop-in)**: 5. **Hawaii A e C — texture pop-in**: jogue com TEXTURAS = NÍTIDAS e com ORIGINAL N64 e me diga se o pop-in some no segundo caso.
+
+## 13. Leo Build 0.1.4 (canary) — o que testar nesta rodada (2026-11-15)
+
+**P1**
+1. **Músicas até o fim (Enhanced)**: termine uma corrida e deixe a tela de vitória/resultados parada; a música da vitória deve tocar o mesmo tempo que no Legacy (~33 s antes de trocar), e a música da tela de rank também. Compare com o Legacy se achar curto.
+2. **Chiado / ranhura nas corridas (Enhanced)**: corra com muitos carros e o motor no talo; ouça se o chiado e os sons fora de lugar diminuíram. Se continuar, mande o log: ele registra `ANEL VELHO`, `bomba de audio ... parada` e `Insufficient Free Buffers`.
+3. **Outro PC — setup**: abra o setup: texto nítido, janela inteira visível (também em notebook 1366x768 e com escala de 125–200%), botões clicáveis; arraste a janela entre monitores de DPI diferentes. Clique em **ABRIR PASTA DE LOGS** (ou L): abre a pasta com os logs.
+4. **Outro PC — log**: jogue 5 minutos, feche, e mande `wdc_log_*.txt` mais recente; o cabeçalho `[sys]` deve listar Windows, CPU, memória, placas de vídeo (com driver), monitores (DPI) e o dispositivo de áudio.
+5. **Travadas raras**: se acontecer uma, anote o momento e mande o log: as linhas `[hitch]` agora trazem a CPU do RDP, a GPU, o estado do jogo e se era corrida.
+
+**P2**: o cache de pipelines (`%LOCALAPPDATA%\WorldDriverChampionship\cache`) faz a 2ª abertura com menos travadas no início.
