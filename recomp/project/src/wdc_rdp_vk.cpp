@@ -335,6 +335,29 @@ void gov_update() {
 }
 
 // Fim de um quadro (SYNC_FULL atendido). L = do primeiro lote do quadro ate a GPU terminar; W = espera da GPU no SYNC_FULL; enq = CPU enfileirando o ultimo lote.
+// ---------------------------------------------------------------------------------------------------------------------------------
+// ORDEM DE EXIBICAO (Enhanced). Sem a 2a espera de VI (hook de func_800013DC) o jogo desenha o proximo quadro no buffer que o VI ainda exibe. A 60 Hz isso so produz
+// quadros pela metade (g_deglitch); nas telas de 30 Hz (abertura, replay, demo) produz algo pior: cada buffer fica 2 ticks na tela e o quadro novo e desenhado nele no
+// SEGUNDO tick, entao o primeiro tick de cada par mostra o quadro de DOIS quadros atras: a imagem anda para frente e para tras (F0 F2 F1 F3 F2 F4...), o "pipocar" e o motion
+// blur estranho da abertura e dos replays. (Medido na abertura: 68 trocas de buffer a cada tick contra 1 no Legacy; cada buffer = 941 comandos no 2o tick.)
+// Correcao: cada quadro COMPLETO (SYNC_FULL) recebe um numero de serie, gravado nos color images que ele usou; se o VI pede um buffer de serie MENOR que a do ultimo quadro
+// exibido, reapresenta-se o ultimo quadro em vez de voltar no tempo (no maximo 1 vez seguida, para nunca congelar a tela por engano). WDC_NO_ORDER=1 desliga (comparar).
+// ---------------------------------------------------------------------------------------------------------------------------------
+struct BufSerial { uint32_t base; uint64_t serial; };
+BufSerial g_bufser[8]; int g_bufser_n = 0;
+uint64_t g_frame_serial = 0, g_last_shown_serial = 0, g_back_repeats = 0;
+int g_back_run = 0;
+bool g_order_on = false;
+std::vector<RDP::RGBA> g_last_px; unsigned g_last_w = 0, g_last_h = 0;
+void bufser_set(uint32_t base, uint64_t serial) {
+    for (int i = 0; i < g_bufser_n; i++) if (g_bufser[i].base == base) { g_bufser[i].serial = serial; return; }
+    if (g_bufser_n < 8) g_bufser[g_bufser_n++] = {base, serial};
+}
+uint64_t bufser_get(uint32_t origin) {   // o origin do VI e a base do buffer (ou uma linha adiante, em campos)
+    for (int i = 0; i < g_bufser_n; i++) if ((uint32_t)(origin - g_bufser[i].base) < 0x4000u) return g_bufser[i].serial;
+    return 0;
+}
+
 void gov_frame_end(double L_ms, double W_ms, double enq_ms) {
     {
         const auto now = std::chrono::steady_clock::now();
@@ -350,6 +373,7 @@ void gov_frame_end(double L_ms, double W_ms, double enq_ms) {
     } else {
         g_gov.rendered++;
         for (int k = 0; k < g_gov.cimg_n; k++) stale_remove(g_gov.cimgs[k]);
+        if (g_order_on) { ++g_frame_serial; for (int k = 0; k < g_gov.cimg_n; k++) bufser_set(g_gov.cimgs[k], g_frame_serial); }
         // So custa ao governador o que PULAR quadros alivia: se a GPU acompanhou a producao dos comandos (W ~ 0), o tempo L e do RSP/jogo, nao do RDP.
         const double sample = std::min(W_ms >= 1.5 ? L_ms : W_ms + enq_ms, 2.0 * g_gov.period_ms);   // uma travada isolada (compilacao de shader) nao vale por muitos quadros
         g_gov.cost_ema = g_gov.cost_n == 0 ? sample : g_gov.cost_ema + 0.12 * (sample - g_gov.cost_ema);
@@ -371,7 +395,10 @@ struct FlickFrame { std::vector<RDP::RGBA> px; std::vector<uint8_t> grid; unsign
 uint32_t g_cimg_cur = 0; uint64_t g_ndraw_since = 0;   // color image corrente e comandos de desenho (triangulos, rects, fill) desde o scanout anterior
 std::vector<uint32_t> g_cimg_since;   // enderecos de SET_COLOR_IMAGE vistos nos comandos processados desde o scanout anterior (so a thread do RDP)
 FlickFrame g_ff[3];            // [0] = N-2, [1] = N-1, [2] = N (mais recente)
+uint32_t g_tl_tri = 0, g_tl_rect = 0, g_tl_timg = 0;   // WDC_TRILOG: triangulos/retangulos/SET_TEX_IMAGE por quadro (diagnostico de LOD)
 uint64_t g_flick_frames = 0, g_flick_found = 0, g_flick_big = 0, g_flick_found2 = 0;
+uint64_t g_origin_runs[6] = {0, 0, 0, 0, 0, 0};   // quantos ticks de VI seguidos mostram o MESMO buffer (origin): 1, 2, 3, 4, 5, 6+ (Legacy: 2; corrida a 60 Hz: 1)
+uint32_t g_origin_prev = 0xFFFFFFFFu; int g_origin_run = 0;
 
 std::vector<uint8_t> make_grid(const std::vector<RDP::RGBA>& px, unsigned w, unsigned h) {
     std::vector<uint8_t> g((size_t)kGW * kGH, 0);
@@ -425,7 +452,30 @@ void flicker_feed(const std::vector<RDP::RGBA>& px, unsigned w, unsigned h) {
     }
     if (g_ff[0].grid.empty() || g_ff[0].w != w || g_ff[1].w != w || g_ff[0].h != h || g_ff[1].h != h) return;
     const double d21 = grid_mad(g_ff[0].grid, g_ff[1].grid), d10 = grid_mad(g_ff[1].grid, g_ff[2].grid), d20 = grid_mad(g_ff[0].grid, g_ff[2].grid);
-    if (d21 > g_flick_T) g_flick_big++;
+    {   // WDC_FLICKER_TRACE=t0,t1: uma linha por tick de VI nessa janela de tempo (origin, color images desenhadas desde o scanout anterior, comandos de desenho)
+        static double tr0 = -1, tr1 = -1;
+        static bool tr_init = false;
+        if (!tr_init) { tr_init = true; if (const char* e = std::getenv("WDC_FLICKER_TRACE")) std::sscanf(e, "%lf,%lf", &tr0, &tr1); }
+        if (tr0 >= 0 && g_ff[2].t >= tr0 && g_ff[2].t <= tr1) {
+            std::printf("[tick %7.2fs] #%llu origin=0x%06X luma(grade)=%.1f desenhado:", g_ff[2].t, (unsigned long long)g_ff[2].n, g_ff[2].origin & 0xFFFFFF, grid_mad(g_ff[1].grid, g_ff[2].grid));
+            for (uint32_t a : g_ff[2].drawn) std::printf(" %06X", a & 0xFFFFFF);
+            std::printf(" (cimg %06X, %llu cmds)\n", g_ff[2].cimg_cur & 0xFFFFFF, (unsigned long long)g_ff[2].ndraw);
+        }
+    }
+    {
+        const uint32_t ob = (g_ff[2].origin & 0xFFFFFF) >> 12;   // buffer = origin sem a linha de campo
+        if (ob == g_origin_prev) g_origin_run++;
+        else { if (g_origin_run > 0) g_origin_runs[std::min(g_origin_run, 6) - 1]++; g_origin_prev = ob; g_origin_run = 1; }
+    }
+    if (d21 > g_flick_T) {
+        g_flick_big++;
+        static const bool jl = std::getenv("WDC_FLICKER_LOG") != nullptr;
+        if (jl && g_flick_big <= 400) {
+            std::printf("[flick-jump %7.2fs] quadro #%llu: salto %.1f (origin ant=0x%06X atual=0x%06X, STATUS 0x%X); desenhado antes deste scanout:", g_ff[1].t, (unsigned long long)g_ff[1].n, d21, g_ff[0].origin & 0xFFFFFF, g_ff[1].origin & 0xFFFFFF, g_ff[1].status);
+            for (uint32_t a : g_ff[1].drawn) std::printf(" %06X", a & 0xFFFFFF);
+            std::printf(" (cimg %06X, %llu cmds de desenho)\n", g_ff[1].cimg_cur & 0xFFFFFF, (unsigned long long)g_ff[1].ndraw);
+        }
+    }
     if (d21 > g_flick_T && d10 > g_flick_T && d20 < 0.5 * std::min(d21, d10)) {
         g_flick_found++;
         std::printf("[flicker %7.2fs] quadro #%llu intruso: d(ant,x)=%.1f d(x,prox)=%.1f d(ant,prox)=%.1f; VI_ORIGIN ant=0x%06X x=0x%06X prox=0x%06X STATUS x=0x%X\n",
@@ -503,6 +553,7 @@ void do_scanout(bool want_shot, int64_t t_vi_us) {
         if (ms > g_scan_ms_max) g_scan_ms_max = ms;
     }
     g_scanouts++;
+    if (g_order_on && w && h) { g_last_px = px; g_last_w = w; g_last_h = h; }
     if (w && h && g_scan_repeat_enabled) {   // memoria do ultimo scanout real (ver REPETICAO DE SCANOUT)
         const uint32_t span = vi_fb_span(g_vi_latest);
         if (span) {
@@ -592,11 +643,24 @@ void process_vi(Job& j) {   // Vi: fim de quadro
             }
         }
     }
+    if (g_order_on && !repeated && !shot && (g_present || g_flick_dir)) {   // ordem de exibicao: nunca voltar no tempo (ver ORDEM DE EXIBICAO)
+        static uint32_t prev_mode[6] = {};
+        const uint32_t cur_mode[6] = {j.vi[0] & ~0x10000u, j.vi[2], j.vi[9], j.vi[10], j.vi[12], j.vi[13]};   // o bit 16 do STATUS e o campo
+        if (std::memcmp(prev_mode, cur_mode, sizeof prev_mode) != 0) { std::memcpy(prev_mode, cur_mode, sizeof prev_mode); g_last_shown_serial = 0; }   // modo de video novo: recomeca
+        const uint64_t s = bufser_get(j.vi[1] & 0xFFFFFF);
+        if (s && s < g_last_shown_serial && g_back_run < 1 && !g_last_px.empty() && g_last_w && g_last_h) {
+            std::vector<RDP::RGBA> c = g_last_px;
+            deliver(c, g_last_w, g_last_h, j.t_us);   // reapresenta o ultimo quadro (passa pelo mesmo filtro que os reais)
+            g_back_run++; g_back_repeats++;
+            repeated = true;
+        } else if (s) g_last_shown_serial = s;
+    }
     if (!repeated && (shot || g_present || g_flick_dir)) {
         const auto tv0 = std::chrono::steady_clock::now();
         do_scanout(shot, j.t_us);
         g_verify_candidate = false;
         g_repeat_run = 0;
+        g_back_run = 0;
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tv0).count();
         g_vi_ms_total += ms;
         if (ms > g_vi_ms_max) g_vi_ms_max = ms;
@@ -742,6 +806,7 @@ void thread_main() {
                 }
                 if (g_flick_dir) { const uint32_t op = (w[0] >> 24) & 0x3F; if ((op >= 0x08 && op <= 0x0F) || op == 0x24 || op == 0x25 || op == 0x36) g_ndraw_since++; }
                 const uint32_t op_g = (w[0] >> 24) & 0x3F;
+                { static const bool tl = std::getenv("WDC_TRILOG") != nullptr; if (tl) { if (op_g >= 0x08 && op_g <= 0x0F) g_tl_tri++; else if (op_g == 0x24 || op_g == 0x25) g_tl_rect++; else if (op_g == 0x3D) g_tl_timg++; } }
                 if (!g_gov.in_frame) { g_gov.in_frame = true; g_gov.frame_start = tj0; g_gov.cimg_n = 0; g_gov.skip = gov_decide_skip(); }
                 if (op_g == 0x3F && n >= 2) {   // SET_COLOR_IMAGE
                     g_cur_cimg = w[1] & 0xFFFFFF;
@@ -790,6 +855,7 @@ void thread_main() {
                     }
                     wdc_post_dp();
                     gov_frame_end(gov_L_ms, dt * 1000.0, cpu_ms);
+                    { static const bool tl = std::getenv("WDC_TRILOG") != nullptr; if (tl) { std::printf("[tri %7.3fs] triangulos=%u retangulos=%u texturas=%u\n", wdc_now_s(), g_tl_tri, g_tl_rect, g_tl_timg); g_tl_tri = g_tl_rect = g_tl_timg = 0; } }
                 }
                 i += n + 1;
             }
@@ -851,6 +917,7 @@ bool wdc_rdp_vk_init(uint8_t* rdram, size_t rdram_size, int gpu_index) {
     RDP::g_wdc_point_sampling = wdc_cfg().sharp_textures || std::getenv("WDC_POINT_TEX") != nullptr;
     g_deglitch = wdc_cfg().fps60 && !std::getenv("WDC_NO_DEGLITCH");   // filtro de quadro intruso (so Enhanced a 60 Hz)
     g_rdram_size = rdram_size;
+    g_order_on = wdc_cfg().fps60 && !std::getenv("WDC_NO_ORDER");
     g_gov.user_enabled = wdc_cfg().perf_auto && !wdc_cfg().fps60 && !std::getenv("WDC_NO_GOV");   // so no Legacy: no Enhanced (60 Hz so em corrida, 30 Hz nos menus) nao ha periodo unico, e quem quer qualidade e escala alta aceita o custo
     g_gov.period_ms = wdc_cfg().fps60 ? 1000.0 / 60.0 : 1000.0 / 30.0;
     g_active = true;
@@ -947,6 +1014,8 @@ void wdc_rdp_vk_print_stats() {
     if (g_gate_on.load()) std::printf("[rdp-vk] portao de buffer: %llu lotes retidos, %llu scanouts adiantados, %llu estouros de 30 ms\n", (unsigned long long)g_gate_holds.load(), (unsigned long long)g_gate_reorders.load(), (unsigned long long)g_gate_timeouts.load());
     if (g_flick_dir) std::printf("[flicker] quadros analisados: %llu; com salto > %.1f em relacao ao anterior: %llu; QUADROS INTRUSOS (A,X,A'): %llu; DOIS quadros (A,X,Y,B): %llu\n",
                                  (unsigned long long)g_flick_frames, g_flick_T, (unsigned long long)g_flick_big, (unsigned long long)g_flick_found, (unsigned long long)g_flick_found2);
+    if (g_flick_dir) std::printf("[flicker] ticks seguidos no MESMO buffer (1 / 2 / 3 / 4 / 5 / 6+): %llu / %llu / %llu / %llu / %llu / %llu\n", (unsigned long long)g_origin_runs[0], (unsigned long long)g_origin_runs[1],
+                                 (unsigned long long)g_origin_runs[2], (unsigned long long)g_origin_runs[3], (unsigned long long)g_origin_runs[4], (unsigned long long)g_origin_runs[5]);
     std::printf("[rdp-vk] intervalo entre quadros (ms): <20=%llu 20-30=%llu 30-40=%llu 40-60=%llu 60-100=%llu 100-200=%llu >=200=%llu; quadros com > 20 ms de CPU so enfileirando: %llu (maximo %.1f ms)\n",
                 (unsigned long long)g_gap_hist[0], (unsigned long long)g_gap_hist[1], (unsigned long long)g_gap_hist[2], (unsigned long long)g_gap_hist[3], (unsigned long long)g_gap_hist[4],
                 (unsigned long long)g_gap_hist[5], (unsigned long long)g_gap_hist[6], (unsigned long long)g_slow_cpu_frames, g_cpu_ms_max);
@@ -963,6 +1032,7 @@ void wdc_rdp_vk_print_stats() {
     std::printf("governador (%s): %llu quadros desenhados, %llu pulados (%llu comandos de desenho), menor fracao %.2f, custo %.1f ms + scanout %.1f ms; ticks de VI com buffer velho: %llu\n",
                 g_gov.user_enabled ? "auto" : "desligado", (unsigned long long)g_gov.rendered, (unsigned long long)g_gov.skipped, (unsigned long long)g_gov_skipped_cmds, g_gov.min_frac,
                 g_gov.cost_ema, g_gov.scan_ema, (unsigned long long)g_stale_ticks);
+    if (g_order_on) std::printf("[rdp-vk] ordem de exibicao: %llu quadros repetidos para nao voltar no tempo (de %llu quadros completos)\n", (unsigned long long)g_back_repeats, (unsigned long long)g_frame_serial);
     std::printf("[rdp-vk] comandos enviados a GPU: %llu; SYNC_FULL: %llu (espera media %.2f ms, maxima %.2f ms); quadros: %llu; scanouts: %llu\n",
                 (unsigned long long)g_cmds.load(), (unsigned long long)g_syncs.load(),
                 g_syncs.load() ? 1000.0 * g_sync_wait_total / (double)g_syncs.load() : 0.0, 1000.0 * g_sync_wait_max,

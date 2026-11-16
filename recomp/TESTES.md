@@ -208,6 +208,18 @@ Ferramentas: `recomp/explore/arc/scripts` (`run_win.sh`: rota de corrida do Lega
 
 **Não verificado**: em outro PC fraco de verdade (o do pai do usuário); cache frio do driver Intel após a correção; aspecto visual do frameskip em jogo real; antivírus/overlays.
 
+### 14.1 Abertura e replay no Enhanced (ordem de exibição)
+
+| Teste | Antes | Depois | Legacy |
+|---|---|---|---|
+| Abertura 46 s, saltos de luminância entre quadros | 62 | 16 | 13 |
+| Abertura, quadros intrusos apagados pelo filtro | 6 | 0 | - |
+| Replay embutido (R5, 100 s), saltos | 177 | 87 | 93 |
+| Replay, intrusos apagados | 16 | 1 | 1 |
+| Campeonato completo (R2, 150 s): repetições de ordem | - | 340 de 8.623 quadros (só telas de 30 Hz) | - |
+| Janela 4x, V-Sync, abertura | - | 99% dos quadros ficam 2 vblanks | - |
+| Legacy, quadro de controle | idêntico | idêntico | - |
+
 ## 13. Leo Build 0.1.4 (canary) — o que testar nesta rodada (2026-11-15)
 
 **P1**
